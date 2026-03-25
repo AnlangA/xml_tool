@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<company name="TechCorp" founded="2010">
+  <headquarters>
+    <address type="main">
+      <street>123 Innovation Drive</street>
+      <city>San Francisco</city>
+      <state>California</state>
+      <zip>94102</zip>
+      <country>USA</country>
+    </address>
+    <address type="billing">
+      <street>456 Finance Ave</street>
+      <city>San Francisco</city>
+      <state>California</state>
+      <zip>94103</zip>
+      <country>USA</country>
+    </address>
+  </headquarters>
+  <departments>
+    <department id="eng" budget="5000000">
+      <name>Engineering</name>
+      <manager>John Smith</manager>
+      <employees>
+        <employee id="e001">
+          <name>Alice Johnson</name>
+          <title>Senior Engineer</title>
+          <salary currency="USD">150000</salary>
+          <skills>
+            <skill>Rust</skill>
+            <skill>Python</skill>
+            <skill>System Design</skill>
+          </skills>
+        </employee>
+        <employee id="e002">
+          <name>Bob Williams</name>
+          <title>Junior Engineer</title>
+          <salary currency="USD">80000</salary>
+          <skills>
+            <skill>JavaScript</skill>
+            <skill>React</skill>
+          </skills>
+        </employee>
+      </employees>
+    </department>
+    <department id="sales" budget="3000000">
+      <name>Sales</name>
+      <manager>Jane Doe</manager>
+      <employees>
+        <employee id="s001">
+          <name>Charlie Brown</name>
+          <title>Sales Manager</title>
+          <salary currency="USD">120000</salary>
+          <region>West Coast</region>
+        </employee>
+      </employees>
+    </department>
+  </departments>
+  <products>
+    <product sku="PROD-001" status="active">
+      <name>Cloud Platform</name>
+      <category>Infrastructure</category>
+      <pricing model="subscription">
+        <tier level="basic">
+          <price>99.99</price>
+          <features>
+            <feature>5GB Storage</feature>
+            <feature>100 API Calls/day</feature>
+          </features>
+        </tier>
+        <tier level="pro">
+          <price>299.99</price>
+          <features>
+            <feature>50GB Storage</feature>
+            <feature>Unlimited API Calls</feature>
+            <feature>Priority Support</feature>
+          </features>
+        </tier>
+      </pricing>
+    </product>
+  </products>
+</company>

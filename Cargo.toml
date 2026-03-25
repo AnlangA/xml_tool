@@ -1,0 +1,34 @@
+[package]
+name = "xml_tool"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+# XML parsing
+quick-xml = "0.39.2"
+
+# EXI (Efficient XML Interchange) encoding/decoding
+erxi = { git = "https://github.com/schachmadinejad/erxi", default-features = false }
+
+# GUI framework
+eframe = "0.33.3"
+egui = "0.33.3"
+egui_extras = { version = "0.33.3", features = ["image"] }
+
+# File dialog
+rfd = "0.15"
+
+# Theme
+catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
+
+# Utilities
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
