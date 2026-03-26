@@ -148,6 +148,30 @@ pub struct XmlDocument {
     version: u64, // Document version for cache invalidation
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElementPosition {
+    pub parent_id: Option<u64>,
+    pub element_index: usize,
+    pub element_count: usize,
+    pub reorderable: bool,
+}
+
+impl ElementPosition {
+    pub fn can_move_up(self) -> bool {
+        self.reorderable && self.element_index > 0
+    }
+
+    pub fn can_move_down(self) -> bool {
+        self.reorderable && self.element_index + 1 < self.element_count
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveDirection {
+    Up,
+    Down,
+}
+
 impl XmlDocument {
     pub fn new(root: XmlNode) -> Self {
         Self {
@@ -275,6 +299,20 @@ impl XmlDocument {
         Ok(true)
     }
 
+    pub fn element_position(&self, id: u64) -> Option<ElementPosition> {
+        let root = self.root.as_element()?;
+        if root.id.0 == id {
+            return Some(ElementPosition {
+                parent_id: None,
+                element_index: 0,
+                element_count: 1,
+                reorderable: false,
+            });
+        }
+
+        find_element_position(self.root.as_ref(), id)
+    }
+
     pub fn append_child_element(
         &mut self,
         parent_id: u64,
@@ -296,6 +334,27 @@ impl XmlDocument {
         Ok(Some(child_id))
     }
 
+    pub fn insert_sibling_element_after(
+        &mut self,
+        id: u64,
+        sibling_name: String,
+    ) -> Result<Option<u64>> {
+        if self.root.as_element().is_some_and(|root| root.id.0 == id) {
+            bail!("Cannot add a sibling to the document root element");
+        }
+
+        let sibling_name = sibling_name.trim().to_string();
+        validate_xml_name(&sibling_name)?;
+
+        let root = Arc::make_mut(&mut self.root);
+        let inserted_id = insert_sibling_element_after_by_id(root, id, &sibling_name);
+        if inserted_id.is_some() {
+            self.increment_version();
+        }
+
+        Ok(inserted_id)
+    }
+
     pub fn remove_element(&mut self, id: u64) -> Result<Option<u64>> {
         if self.root.as_element().is_some_and(|root| root.id.0 == id) {
             bail!("Cannot remove the document root element");
@@ -309,12 +368,34 @@ impl XmlDocument {
         Ok(removed_parent_id)
     }
 
+    pub fn move_element_up(&mut self, id: u64) -> Result<bool> {
+        self.move_element(id, MoveDirection::Up)
+    }
+
+    pub fn move_element_down(&mut self, id: u64) -> Result<bool> {
+        self.move_element(id, MoveDirection::Down)
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
 
     pub fn increment_version(&mut self) {
         self.version += 1;
+    }
+
+    fn move_element(&mut self, id: u64, direction: MoveDirection) -> Result<bool> {
+        if self.root.as_element().is_some_and(|root| root.id.0 == id) {
+            bail!("Cannot move the document root element");
+        }
+
+        let root = Arc::make_mut(&mut self.root);
+        let moved = move_element_by_id(root, id, direction)?;
+        if moved {
+            self.increment_version();
+        }
+
+        Ok(moved)
     }
 }
 
@@ -364,6 +445,31 @@ fn find_element_by_id_mut(node: &mut XmlNode, id: u64) -> Option<&mut XmlElement
     None
 }
 
+fn find_element_position(node: &XmlNode, id: u64) -> Option<ElementPosition> {
+    let element = node.as_element()?;
+    let element_children = direct_element_child_positions(element);
+
+    if let Some(element_index) = element_children
+        .iter()
+        .position(|(_, child_id)| *child_id == id)
+    {
+        return Some(ElementPosition {
+            parent_id: Some(element.id.0),
+            element_index,
+            element_count: element_children.len(),
+            reorderable: has_only_element_children(element),
+        });
+    }
+
+    for child in &element.children {
+        if let Some(found) = find_element_position(child, id) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn validate_xml_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -383,6 +489,26 @@ fn validate_xml_name(name: &str) -> Result<()> {
 
 fn is_invalid_name_char(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '<' | '>' | '&' | '"' | '\'' | '/' | '=')
+}
+
+fn direct_element_child_positions(element: &XmlElement) -> Vec<(usize, u64)> {
+    element
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| {
+            child
+                .as_element()
+                .map(|child_elem| (index, child_elem.id.0))
+        })
+        .collect()
+}
+
+fn has_only_element_children(element: &XmlElement) -> bool {
+    element
+        .children
+        .iter()
+        .all(|child| matches!(child, XmlNode::Element(_)))
 }
 
 fn promote_inline_text_to_children(element: &mut XmlElement) {
@@ -429,8 +555,80 @@ fn remove_element_by_id(node: &mut XmlNode, id: u64) -> Option<u64> {
     None
 }
 
+fn insert_sibling_element_after_by_id(
+    node: &mut XmlNode,
+    id: u64,
+    sibling_name: &str,
+) -> Option<u64> {
+    let element = node.as_element_mut()?;
+
+    if let Some(index) = element
+        .children
+        .iter()
+        .position(|child| matches!(child, XmlNode::Element(child_elem) if child_elem.id.0 == id))
+    {
+        let sibling = XmlElement::new(sibling_name.to_string());
+        let sibling_id = sibling.id.0;
+        element
+            .children
+            .insert(index + 1, XmlNode::Element(sibling));
+        return Some(sibling_id);
+    }
+
+    for child in &mut element.children {
+        if let Some(inserted_id) = insert_sibling_element_after_by_id(child, id, sibling_name) {
+            return Some(inserted_id);
+        }
+    }
+
+    None
+}
+
+fn move_element_by_id(node: &mut XmlNode, id: u64, direction: MoveDirection) -> Result<bool> {
+    let Some(element) = node.as_element_mut() else {
+        return Ok(false);
+    };
+
+    let element_children = direct_element_child_positions(element);
+    if let Some(element_index) = element_children
+        .iter()
+        .position(|(_, child_id)| *child_id == id)
+    {
+        if !has_only_element_children(element) {
+            bail!("Reordering is only supported when the parent contains only element children");
+        }
+
+        let swap_with = match direction {
+            MoveDirection::Up if element_index > 0 => Some(element_index - 1),
+            MoveDirection::Down if element_index + 1 < element_children.len() => {
+                Some(element_index + 1)
+            }
+            _ => None,
+        };
+
+        let Some(target_index) = swap_with else {
+            return Ok(false);
+        };
+
+        element.children.swap(
+            element_children[element_index].0,
+            element_children[target_index].0,
+        );
+        return Ok(true);
+    }
+
+    for child in &mut element.children {
+        if move_element_by_id(child, id, direction)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::ElementPosition;
     use crate::xml::{XmlNode, parse_xml};
 
     #[test]
@@ -580,5 +778,75 @@ mod tests {
             .remove_element(root_id)
             .expect_err("root removal should fail");
         assert!(err.to_string().contains("document root"));
+    }
+
+    #[test]
+    fn insert_sibling_and_move_element_updates_order() {
+        let mut doc = parse_xml(r#"<root><alpha/><beta/></root>"#).expect("parse");
+        let root_id = doc.root.as_element().expect("root element").id.0;
+        let alpha_id = doc
+            .root
+            .as_element()
+            .and_then(|root| root.children[0].as_element())
+            .expect("alpha element")
+            .id
+            .0;
+        let beta_id = doc
+            .root
+            .as_element()
+            .and_then(|root| root.children[1].as_element())
+            .expect("beta element")
+            .id
+            .0;
+
+        let inserted_id = doc
+            .insert_sibling_element_after(alpha_id, "gamma".to_string())
+            .expect("insert sibling")
+            .expect("inserted sibling");
+        assert_eq!(
+            doc.element_position(inserted_id)
+                .expect("inserted position"),
+            ElementPosition {
+                parent_id: Some(root_id),
+                element_index: 1,
+                element_count: 3,
+                reorderable: true,
+            }
+        );
+
+        assert!(doc.move_element_up(beta_id).expect("move beta"));
+        let root = doc.root.as_element().expect("updated root");
+        let child_names: Vec<&str> = root
+            .children
+            .iter()
+            .map(|child| child.as_element().expect("element child").name.as_str())
+            .collect();
+        assert_eq!(child_names, vec!["alpha", "beta", "gamma"]);
+
+        assert!(doc.move_element_down(beta_id).expect("move beta back"));
+        let root = doc.root.as_element().expect("reordered root");
+        let child_names: Vec<&str> = root
+            .children
+            .iter()
+            .map(|child| child.as_element().expect("element child").name.as_str())
+            .collect();
+        assert_eq!(child_names, vec!["alpha", "gamma", "beta"]);
+    }
+
+    #[test]
+    fn move_element_rejects_mixed_content_parents() {
+        let mut doc = parse_xml(r#"<root>Hello <first/><second/></root>"#).expect("parse");
+        let first_id = doc
+            .root
+            .as_element()
+            .and_then(|root| root.children[1].as_element())
+            .expect("first element")
+            .id
+            .0;
+
+        let err = doc
+            .move_element_down(first_id)
+            .expect_err("mixed-content reordering should fail");
+        assert!(err.to_string().contains("only element children"));
     }
 }

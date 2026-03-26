@@ -105,6 +105,38 @@ impl XmlTreeView {
         self.search_cache.clear();
     }
 
+    pub fn search_match_count(
+        &mut self,
+        root: &XmlNode,
+        doc_version: u64,
+        query: &str,
+        case_sensitive: bool,
+    ) -> usize {
+        if query.is_empty() {
+            0
+        } else {
+            self.search_results_for(root, doc_version, query, case_sensitive)
+                .matched_elements
+                .len()
+        }
+    }
+
+    pub fn adjacent_search_match_id(
+        &mut self,
+        root: &XmlNode,
+        doc_version: u64,
+        query: &str,
+        case_sensitive: bool,
+        backwards: bool,
+    ) -> Option<u64> {
+        if query.is_empty() {
+            return None;
+        }
+
+        let results = self.search_results_for(root, doc_version, query, case_sensitive);
+        Self::adjacent_match_id(&results.matched_elements, self.selected_id, backwards)
+    }
+
     // -----------------------------------------------------------------------
     // Private
     // -----------------------------------------------------------------------
@@ -138,9 +170,16 @@ impl XmlTreeView {
             case_sensitive,
         };
         let mut visible_elements = Vec::new();
+        let mut matched_elements = Vec::new();
         let mut name_matches = Vec::new();
 
-        Self::collect_search_matches(root, &matcher, &mut visible_elements, &mut name_matches);
+        Self::collect_search_matches(
+            root,
+            &matcher,
+            &mut visible_elements,
+            &mut matched_elements,
+            &mut name_matches,
+        );
         visible_elements.sort_unstable();
         visible_elements.dedup();
         name_matches.sort_unstable();
@@ -148,6 +187,7 @@ impl XmlTreeView {
 
         SearchResults {
             visible_elements,
+            matched_elements,
             name_matches,
         }
     }
@@ -156,15 +196,17 @@ impl XmlTreeView {
         node: &XmlNode,
         matcher: &SearchMatcher<'_>,
         visible_elements: &mut Vec<u64>,
+        matched_elements: &mut Vec<u64>,
         name_matches: &mut Vec<u64>,
     ) -> bool {
         match node {
             XmlNode::Element(elem) => {
-                let mut subtree_matches = false;
+                let mut element_matches_self = false;
+                let mut descendant_matches = false;
 
                 if matcher.matches(&elem.name) {
                     name_matches.push(elem.id.0);
-                    subtree_matches = true;
+                    element_matches_self = true;
                 }
 
                 if elem
@@ -172,7 +214,7 @@ impl XmlTreeView {
                     .iter()
                     .any(|attr| matcher.matches(&attr.name) || matcher.matches(&attr.value))
                 {
-                    subtree_matches = true;
+                    element_matches_self = true;
                 }
 
                 if elem
@@ -180,21 +222,34 @@ impl XmlTreeView {
                     .as_deref()
                     .is_some_and(|text| matcher.matches(text))
                 {
-                    subtree_matches = true;
+                    element_matches_self = true;
                 }
 
                 for child in &elem.children {
-                    if Self::collect_search_matches(child, matcher, visible_elements, name_matches)
-                    {
-                        subtree_matches = true;
+                    let child_matches = Self::collect_search_matches(
+                        child,
+                        matcher,
+                        visible_elements,
+                        matched_elements,
+                        name_matches,
+                    );
+                    if child_matches {
+                        descendant_matches = true;
+                        if !matches!(child, XmlNode::Element(_)) {
+                            element_matches_self = true;
+                        }
                     }
                 }
 
-                if subtree_matches {
+                if element_matches_self {
+                    matched_elements.push(elem.id.0);
+                }
+
+                if element_matches_self || descendant_matches {
                     visible_elements.push(elem.id.0);
                 }
 
-                subtree_matches
+                element_matches_self || descendant_matches
             }
             XmlNode::Text(text) => {
                 let trimmed = text.trim();
@@ -278,7 +333,8 @@ impl XmlTreeView {
             // Collapsible header for elements with children.
             let header = egui::CollapsingHeader::new(&label)
                 .id_salt(id)
-                .default_open(depth < 2 || highlight);
+                .default_open(depth < 2 || highlight)
+                .open(search.map(|_| true));
 
             let response = header.show(ui, |ui| {
                 for child in &elem.children {
@@ -370,6 +426,26 @@ impl XmlTreeView {
 
         None
     }
+
+    fn adjacent_match_id(
+        matches: &[u64],
+        selected_id: Option<u64>,
+        backwards: bool,
+    ) -> Option<u64> {
+        if matches.is_empty() {
+            return None;
+        }
+
+        match (
+            matches.iter().position(|id| Some(*id) == selected_id),
+            backwards,
+        ) {
+            (Some(index), false) => Some(matches[(index + 1) % matches.len()]),
+            (Some(index), true) => Some(matches[(index + matches.len() - 1) % matches.len()]),
+            (None, false) => matches.first().copied(),
+            (None, true) => matches.last().copied(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +534,7 @@ mod tests {
         assert!(results.contains_visible_element(item_elem.id.0));
         assert!(results.contains_name_match(item_elem.id.0));
         assert!(!results.contains_name_match(branch_elem.id.0));
+        assert_eq!(results.matched_elements, vec![item_elem.id.0]);
     }
 
     #[test]
@@ -472,5 +549,27 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &different_version));
         assert_eq!(view.search_cache.len(), 2);
+    }
+
+    #[test]
+    fn adjacent_match_navigation_wraps() {
+        let matches = [10, 20, 30];
+
+        assert_eq!(
+            XmlTreeView::adjacent_match_id(&matches, None, false),
+            Some(10)
+        );
+        assert_eq!(
+            XmlTreeView::adjacent_match_id(&matches, Some(10), false),
+            Some(20)
+        );
+        assert_eq!(
+            XmlTreeView::adjacent_match_id(&matches, Some(30), false),
+            Some(10)
+        );
+        assert_eq!(
+            XmlTreeView::adjacent_match_id(&matches, Some(10), true),
+            Some(30)
+        );
     }
 }

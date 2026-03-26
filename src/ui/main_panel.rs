@@ -44,6 +44,7 @@ pub struct MainPanel {
     show_raw_xml: bool,
     syntax_highlighter: SyntaxHighlighter,
     detail_editor: DetailEditorState,
+    pending_delete_confirmation: Option<u64>,
 
     // Status bar
     status_data: StatusBarData,
@@ -61,6 +62,7 @@ struct DetailEditorState {
     new_attribute_name: String,
     new_attribute_value: String,
     new_child_name: String,
+    new_sibling_name: String,
 }
 
 impl DetailEditorState {
@@ -89,6 +91,7 @@ impl DetailEditorState {
         self.new_attribute_name.clear();
         self.new_attribute_value.clear();
         self.new_child_name.clear();
+        self.new_sibling_name.clear();
     }
 
     fn has_changes(&self, info: &SelectedNodeInfo) -> bool {
@@ -143,6 +146,7 @@ impl MainPanel {
             show_raw_xml: false,
             syntax_highlighter: SyntaxHighlighter::new(),
             detail_editor: DetailEditorState::default(),
+            pending_delete_confirmation: None,
 
             status_data,
 
@@ -174,6 +178,7 @@ impl MainPanel {
         let ctrl_e = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::E);
         let ctrl_s = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::S);
         let ctrl_f = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::F);
+        let ctrl_q = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::Q);
         let f1 = egui::KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
         // Ctrl+O: Open XML
@@ -191,6 +196,15 @@ impl MainPanel {
         // Ctrl+F: Focus search
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_f)) {
             self.search_bar.focus();
+        }
+        // Esc: Clear search
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) && self.search_bar.clear()
+        {
+            self.set_status("Search cleared.");
+        }
+        // Ctrl+Q: Quit application
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_q)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // F1: Show shortcuts help
         if ctx.input_mut(|i| i.consume_shortcut(&f1)) {
@@ -239,6 +253,7 @@ impl MainPanel {
                 self.current_document = Some(doc);
                 self.current_file_path = Some(path.clone());
                 self.current_file_type = FileType::Xml;
+                self.clear_delete_confirmation();
                 self.xml_tree_view.clear_search_cache();
                 self.xml_tree_view.clear_selection();
                 self.detail_editor.clear();
@@ -261,6 +276,7 @@ impl MainPanel {
                     self.current_document = Some(doc);
                     self.current_file_path = Some(path.clone());
                     self.current_file_type = FileType::Exi;
+                    self.clear_delete_confirmation();
                     self.xml_tree_view.clear_search_cache();
                     self.xml_tree_view.clear_selection();
                     self.detail_editor.clear();
@@ -309,6 +325,7 @@ impl MainPanel {
         match decode_exi_to_xml(exi) {
             Ok(doc) => {
                 self.current_document = Some(doc);
+                self.clear_delete_confirmation();
                 self.xml_tree_view.clear_search_cache();
                 self.xml_tree_view.clear_selection();
                 self.detail_editor.clear();
@@ -504,6 +521,11 @@ impl MainPanel {
     }
 
     fn show_tree_panel(&mut self, ui: &mut egui::Ui) {
+        let search_context = self
+            .current_document
+            .as_ref()
+            .map(|doc| (doc.version(), doc.root.clone()));
+
         ui.vertical(|ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -521,6 +543,34 @@ impl MainPanel {
                 ui.add_space(8.0);
                 ui.add_space(4.0);
                 let _ = self.search_bar.show(ui);
+                if !self.search_bar.query.is_empty() {
+                    let match_count = search_context.as_ref().map_or(0, |(doc_version, root)| {
+                        self.xml_tree_view.search_match_count(
+                            root.as_ref(),
+                            *doc_version,
+                            &self.search_bar.query,
+                            self.search_bar.case_sensitive,
+                        )
+                    });
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("{match_count} matches"))
+                            .small()
+                            .color(Theme::TEXT_MUTED),
+                    );
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("Prev"))
+                        .clicked()
+                    {
+                        self.select_adjacent_search_match(true);
+                    }
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("Next"))
+                        .clicked()
+                    {
+                        self.select_adjacent_search_match(false);
+                    }
+                }
             });
 
             ui.separator();
@@ -607,6 +657,14 @@ impl MainPanel {
                         .as_ref()
                         .and_then(|doc| doc.root.as_element().map(|root| root.id.0))
                         == Some(info.id);
+                    let selected_position = self
+                        .current_document
+                        .as_ref()
+                        .and_then(|doc| doc.element_position(info.id));
+                    let can_move_up =
+                        selected_position.is_some_and(|position| position.can_move_up());
+                    let can_move_down =
+                        selected_position.is_some_and(|position| position.can_move_down());
 
                     ui.label(RichText::new("Element Name").strong().color(Theme::ACCENT));
                     ui.add_space(5.0);
@@ -778,6 +836,18 @@ impl MainPanel {
                                 .color(Theme::TEXT_PRIMARY),
                         );
                     });
+                    if let Some(position) = selected_position.filter(|position| position.parent_id.is_some()) {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Sibling {} of {}",
+                                position.element_index + 1,
+                                position.element_count
+                            ))
+                            .small()
+                            .color(Theme::TEXT_MUTED),
+                        );
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.add(
@@ -794,9 +864,65 @@ impl MainPanel {
                         }
                     });
                     ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.detail_editor.new_sibling_name)
+                                .hint_text("new sibling element name")
+                                .desired_width(220.0),
+                        );
+                        let can_add_sibling =
+                            !is_root_selected && !self.detail_editor.new_sibling_name.trim().is_empty();
+                        if ui
+                            .add_enabled(can_add_sibling, egui::Button::new("Add Sibling After"))
+                            .clicked()
+                        {
+                            self.add_sibling_to_selected();
+                        }
+                    });
+                    if is_root_selected {
+                        ui.label(
+                            RichText::new("The document root cannot have sibling elements.")
+                                .small()
+                                .color(Theme::TEXT_MUTED),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(can_move_up, egui::Button::new("Move Up"))
+                            .clicked()
+                        {
+                            self.move_selected_element_up();
+                        }
+                        if ui
+                            .add_enabled(can_move_down, egui::Button::new("Move Down"))
+                            .clicked()
+                        {
+                            self.move_selected_element_down();
+                        }
+                    });
+                    if let Some(position) = selected_position
+                        && position.parent_id.is_some()
+                        && !position.reorderable
+                    {
+                        ui.label(
+                            RichText::new(
+                                "Reordering is currently available only when the parent contains element children only.",
+                            )
+                            .small()
+                            .color(Theme::TEXT_MUTED),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    let delete_armed = self.pending_delete_confirmation == Some(info.id);
                     ui.add_enabled_ui(!is_root_selected, |ui| {
-                        if ui.button("Delete Selected Element").clicked() {
-                            self.remove_selected_element();
+                        let delete_label = if delete_armed {
+                            "Confirm Delete"
+                        } else {
+                            "Delete Selected Element"
+                        };
+                        if ui.button(delete_label).clicked() {
+                            self.request_selected_element_removal();
                         }
                     });
                     if is_root_selected {
@@ -804,6 +930,13 @@ impl MainPanel {
                             RichText::new("The document root cannot be deleted.")
                                 .small()
                                 .color(Theme::TEXT_MUTED),
+                        );
+                    }
+                    if delete_armed {
+                        ui.label(
+                            RichText::new("Click delete again to confirm removing this element.")
+                                .small()
+                                .color(Theme::WARNING),
                         );
                     }
                 } else {
@@ -932,7 +1065,44 @@ impl MainPanel {
         self.status_data.set_message(msg);
     }
 
+    fn select_adjacent_search_match(&mut self, backwards: bool) {
+        let query = self.search_bar.query.clone();
+        if query.is_empty() {
+            self.set_status("Enter a search term first.");
+            return;
+        }
+
+        let case_sensitive = self.search_bar.case_sensitive;
+        let Some((doc_version, root)) = self
+            .current_document
+            .as_ref()
+            .map(|doc| (doc.version(), doc.root.clone()))
+        else {
+            self.set_status("No document loaded.");
+            return;
+        };
+
+        let Some(match_id) = self.xml_tree_view.adjacent_search_match_id(
+            root.as_ref(),
+            doc_version,
+            &query,
+            case_sensitive,
+            backwards,
+        ) else {
+            self.set_status("No matching elements found for the current search.");
+            return;
+        };
+
+        self.select_document_node(Some(match_id));
+        self.set_status(if backwards {
+            "Selected previous search match."
+        } else {
+            "Selected next search match."
+        });
+    }
+
     fn apply_selected_element_edits(&mut self) {
+        self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
             self.set_status("No element selected.");
             return;
@@ -1007,6 +1177,7 @@ impl MainPanel {
     }
 
     fn add_attribute_to_selected(&mut self) {
+        self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
             self.set_status("No element selected.");
             return;
@@ -1042,6 +1213,7 @@ impl MainPanel {
     }
 
     fn remove_selected_attribute(&mut self, attribute_name: &str) {
+        self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
             self.set_status("No element selected.");
             return;
@@ -1068,6 +1240,7 @@ impl MainPanel {
     }
 
     fn add_child_to_selected(&mut self) {
+        self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
             self.set_status("No element selected.");
             return;
@@ -1099,7 +1272,105 @@ impl MainPanel {
         }
     }
 
+    fn add_sibling_to_selected(&mut self) {
+        self.clear_delete_confirmation();
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let sibling_name = self.detail_editor.new_sibling_name.trim().to_string();
+        let add_result = match self.current_document.as_mut() {
+            Some(doc) => doc.insert_sibling_element_after(selected_id, sibling_name.clone()),
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        match add_result {
+            Ok(Some(sibling_id)) => {
+                self.detail_editor.new_sibling_name.clear();
+                let cleared_exi = self.invalidate_after_document_edit();
+                self.select_document_node(Some(sibling_id));
+                self.set_status(self.with_exi_notice(
+                    format!("Added sibling element '{sibling_name}'"),
+                    cleared_exi,
+                ));
+            }
+            Ok(None) => self.set_status("Selected element is no longer available."),
+            Err(err) => self.set_status(format!("Cannot add sibling element: {err}")),
+        }
+    }
+
+    fn move_selected_element_up(&mut self) {
+        self.move_selected_element(true);
+    }
+
+    fn move_selected_element_down(&mut self) {
+        self.move_selected_element(false);
+    }
+
+    fn move_selected_element(&mut self, move_up: bool) {
+        self.clear_delete_confirmation();
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let move_result = match self.current_document.as_mut() {
+            Some(doc) => {
+                if move_up {
+                    doc.move_element_up(selected_id)
+                } else {
+                    doc.move_element_down(selected_id)
+                }
+            }
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        match move_result {
+            Ok(true) => {
+                let cleared_exi = self.invalidate_after_document_edit();
+                self.select_document_node(Some(selected_id));
+                self.set_status(self.with_exi_notice(
+                    if move_up {
+                        "Moved selected element up.".to_string()
+                    } else {
+                        "Moved selected element down.".to_string()
+                    },
+                    cleared_exi,
+                ));
+            }
+            Ok(false) => self.set_status(if move_up {
+                "Selected element is already at the top of its sibling list."
+            } else {
+                "Selected element is already at the bottom of its sibling list."
+            }),
+            Err(err) => self.set_status(format!("Cannot reorder selected element: {err}")),
+        }
+    }
+
+    fn request_selected_element_removal(&mut self) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        if self.pending_delete_confirmation != Some(selected_id) {
+            self.pending_delete_confirmation = Some(selected_id);
+            self.set_status("Click delete again to confirm removing the selected element.");
+            return;
+        }
+
+        self.remove_selected_element();
+    }
+
     fn remove_selected_element(&mut self) {
+        self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
             self.set_status("No element selected.");
             return;
@@ -1138,7 +1409,12 @@ impl MainPanel {
         cleared_exi
     }
 
+    fn clear_delete_confirmation(&mut self) {
+        self.pending_delete_confirmation = None;
+    }
+
     fn sync_selection_from_document(&mut self) {
+        self.clear_delete_confirmation();
         if let Some(doc) = &self.current_document {
             self.xml_tree_view.sync_selected_info(doc.root.as_ref());
             if let Some(updated) = self.xml_tree_view.get_selected_info().cloned() {
@@ -1153,6 +1429,7 @@ impl MainPanel {
     }
 
     fn select_document_node(&mut self, id: Option<u64>) {
+        self.clear_delete_confirmation();
         match (&self.current_document, id) {
             (Some(doc), Some(id)) => {
                 self.xml_tree_view.select_id(doc.root.as_ref(), id);

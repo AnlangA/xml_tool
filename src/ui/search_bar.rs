@@ -70,4 +70,13 @@ impl SearchBar {
     pub fn focus(&mut self) {
         self.focused = true;
     }
+
+    pub fn clear(&mut self) -> bool {
+        if self.query.is_empty() {
+            false
+        } else {
+            self.query.clear();
+            true
+        }
+    }
 }

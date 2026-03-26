@@ -251,6 +251,52 @@ fn test_structural_document_mutations_round_trip() {
 }
 
 #[test]
+fn test_reordered_siblings_round_trip() {
+    let mut doc = parse_xml(r#"<root><alpha/><beta/></root>"#).unwrap();
+    let alpha_id = doc.root.as_element().unwrap().children[0]
+        .as_element()
+        .unwrap()
+        .id
+        .0;
+    let beta_id = doc.root.as_element().unwrap().children[1]
+        .as_element()
+        .unwrap()
+        .id
+        .0;
+
+    let gamma_id = doc
+        .insert_sibling_element_after(alpha_id, "gamma".to_string())
+        .unwrap()
+        .unwrap();
+    assert!(doc.move_element_up(beta_id).unwrap());
+
+    let serialized = serialize_xml(&doc).unwrap();
+    let reparsed = parse_xml(&serialized).unwrap();
+    let root = reparsed.root.as_element().unwrap();
+    let child_names: Vec<&str> = root
+        .children
+        .iter()
+        .map(|child| child.as_element().unwrap().name.as_str())
+        .collect();
+
+    assert_eq!(child_names, vec!["alpha", "beta", "gamma"]);
+    assert!(doc.find_element(gamma_id).is_some());
+}
+
+#[test]
+fn test_reordering_mixed_content_is_rejected() {
+    let mut doc = parse_xml(r#"<root>Hello <first/><second/></root>"#).unwrap();
+    let first_id = doc.root.as_element().unwrap().children[1]
+        .as_element()
+        .unwrap()
+        .id
+        .0;
+
+    let err = doc.move_element_down(first_id).unwrap_err();
+    assert!(err.to_string().contains("only element children"));
+}
+
+#[test]
 fn test_unicode_content() {
     let xml = r#"<root>
     <chinese>你好世界</chinese>

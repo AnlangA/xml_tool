@@ -94,6 +94,7 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchResults {
     pub visible_elements: Vec<u64>,
+    pub matched_elements: Vec<u64>,
     pub name_matches: Vec<u64>,
 }
 
@@ -250,6 +251,7 @@ mod tests {
             SearchKey::new("query".to_string(), true, 1),
             Arc::new(SearchResults {
                 visible_elements: vec![1, 2, 3],
+                matched_elements: vec![2],
                 name_matches: vec![2],
             }),
         );
