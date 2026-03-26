@@ -1,3 +1,4 @@
+use xml_tool::exi::{decode_exi_to_xml, encode_xml_to_exi};
 use xml_tool::export::export_to_json;
 use xml_tool::xml::{XmlNode, parse_xml, serialize_xml};
 
@@ -301,6 +302,45 @@ fn test_export_to_json() {
     assert!(json.contains("child"));
     assert!(json.contains("@attributes"));
     assert!(json.contains("attr"));
+}
+
+#[test]
+fn test_exi_round_trip_preserves_comments_and_prefixes() {
+    let xml = r#"<ns:root xmlns:ns="urn:test"><!--note--><ns:child ns:attr="value">text</ns:child></ns:root>"#;
+
+    let exi = encode_xml_to_exi(xml).unwrap();
+    let decoded = decode_exi_to_xml(&exi).unwrap();
+    let root = decoded.root.as_element().unwrap();
+
+    assert_eq!(root.name, "ns:root");
+    assert!(root.attributes.iter().any(|attr| attr.name == "xmlns:ns"));
+    assert!(matches!(&root.children[0], XmlNode::Comment(comment) if comment == "note"));
+
+    let child = root.children[1].as_element().unwrap();
+    assert_eq!(child.name, "ns:child");
+    assert_eq!(child.attributes[0].name, "ns:attr");
+    assert_eq!(child.attributes[0].value, "value");
+    assert_eq!(child.text.as_deref(), Some("text"));
+}
+
+#[test]
+fn test_exi_round_trip_preserves_document_structure() {
+    let xml = r#"<root><parent><!--note--><child attr="value">text</child></parent></root>"#;
+
+    let exi = encode_xml_to_exi(xml).unwrap();
+    let decoded = decode_exi_to_xml(&exi).unwrap();
+    let serialized = serialize_xml(&decoded).unwrap();
+
+    assert!(serialized.contains("<!-- note -->"));
+    assert!(serialized.contains(r#"<child attr="value">text</child>"#));
+}
+
+#[test]
+fn test_invalid_exi_is_reported() {
+    let err = decode_exi_to_xml(b"not exi").unwrap_err();
+    let message = err.to_string();
+
+    assert!(message.contains("failed to decode EXI stream"));
 }
 
 #[test]

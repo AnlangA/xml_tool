@@ -39,8 +39,8 @@ pub struct MainPanel {
     xml_tree_view: XmlTreeView,
     search_bar: SearchBar,
     shortcuts_panel: ShortcutsPanel,
-    raw_xml_cache: Option<String>,
-    raw_xml_highlight_cache: Option<Vec<LayoutJob>>,
+    raw_xml_cache: Option<(u64, String)>,
+    raw_xml_highlight_cache: Option<(u64, Vec<LayoutJob>)>,
     show_raw_xml: bool,
     syntax_highlighter: SyntaxHighlighter,
     detail_editor: DetailEditorState,
@@ -239,6 +239,7 @@ impl MainPanel {
                 self.current_document = Some(doc);
                 self.current_file_path = Some(path.clone());
                 self.current_file_type = FileType::Xml;
+                self.xml_tree_view.clear_search_cache();
                 self.xml_tree_view.clear_selection();
                 self.detail_editor.clear();
                 self.invalidate_raw_xml_cache();
@@ -260,6 +261,7 @@ impl MainPanel {
                     self.current_document = Some(doc);
                     self.current_file_path = Some(path.clone());
                     self.current_file_type = FileType::Exi;
+                    self.xml_tree_view.clear_search_cache();
                     self.xml_tree_view.clear_selection();
                     self.detail_editor.clear();
                     self.invalidate_raw_xml_cache();
@@ -307,6 +309,7 @@ impl MainPanel {
         match decode_exi_to_xml(exi) {
             Ok(doc) => {
                 self.current_document = Some(doc);
+                self.xml_tree_view.clear_search_cache();
                 self.xml_tree_view.clear_selection();
                 self.detail_editor.clear();
                 self.pending_json_export = None;
@@ -533,8 +536,13 @@ impl MainPanel {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    self.xml_tree_view
-                        .show_with_search(ui, root, query, case_sensitive);
+                    self.xml_tree_view.show_with_search(
+                        ui,
+                        root,
+                        doc.version(),
+                        query,
+                        case_sensitive,
+                    );
                 });
         } else {
             ui.vertical_centered(|ui| {
@@ -818,53 +826,69 @@ impl MainPanel {
     }
 
     fn show_raw_xml_tab(&mut self, ui: &mut egui::Ui) {
-        if self.raw_xml_cache.is_none()
-            && let Some(doc) = &self.current_document
+        let current_version = self.current_document.as_ref().map(XmlDocument::version);
+
+        if let (Some(doc), Some(version)) = (&self.current_document, current_version)
+            && self
+                .raw_xml_cache
+                .as_ref()
+                .map(|(cached_version, _)| *cached_version)
+                != Some(version)
         {
-            self.raw_xml_cache = Some(match serialize_xml(doc) {
+            let xml = match serialize_xml(doc) {
                 Ok(xml) => xml,
                 Err(e) => format!("<!-- serialisation error: {e} -->"),
-            });
+            };
+            self.raw_xml_cache = Some((version, xml));
         }
 
-        if self.raw_xml_highlight_cache.is_none()
-            && let Some(xml) = &self.raw_xml_cache
+        if let Some(version) = current_version
+            && self
+                .raw_xml_highlight_cache
+                .as_ref()
+                .map(|(cached_version, _)| *cached_version)
+                != Some(version)
+            && let Some((_, xml)) = &self.raw_xml_cache
         {
-            self.raw_xml_highlight_cache = Some(self.syntax_highlighter.highlight_xml_lines(xml));
+            self.raw_xml_highlight_cache =
+                Some((version, self.syntax_highlighter.highlight_xml_lines(xml)));
         }
 
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(10.0);
+        ui.add_space(10.0);
 
-                if let (Some(xml), Some(line_jobs)) =
-                    (&self.raw_xml_cache, &self.raw_xml_highlight_cache)
-                {
-                    let line_number_width = line_jobs.len().max(1).to_string().len();
-                    Frame::new()
-                        .fill(Theme::CARD_BG)
-                        .inner_margin(10.0)
-                        .corner_radius(4.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("{} lines", line_jobs.len()))
-                                        .small()
-                                        .color(Theme::INFO),
-                                );
-                                ui.separator();
-                                ui.label(
-                                    RichText::new(format!("{} bytes", xml.len()))
-                                        .small()
-                                        .color(Theme::TEXT_MUTED),
-                                );
-                            });
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(8.0);
+        if let (Some((_, xml)), Some((_, line_jobs))) =
+            (&self.raw_xml_cache, &self.raw_xml_highlight_cache)
+        {
+            let line_number_width = line_jobs.len().max(1).to_string().len();
+            let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
 
-                            for (index, job) in line_jobs.iter().enumerate() {
+            Frame::new()
+                .fill(Theme::CARD_BG)
+                .inner_margin(10.0)
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} lines", line_jobs.len()))
+                                .small()
+                                .color(Theme::INFO),
+                        );
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("{} bytes", xml.len()))
+                                .small()
+                                .color(Theme::TEXT_MUTED),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show_rows(ui, row_height, line_jobs.len(), |ui, row_range| {
+                            for index in row_range {
+                                let job = &line_jobs[index];
                                 ui.horizontal(|ui| {
                                     ui.add_sized(
                                         [20.0 + line_number_width as f32 * 8.0, 0.0],
@@ -887,17 +911,17 @@ impl MainPanel {
                                 });
                             }
                         });
-                } else {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(80.0);
-                        ui.label(
-                            RichText::new("No XML loaded")
-                                .color(Theme::TEXT_MUTED)
-                                .italics(),
-                        );
-                    });
-                }
+                });
+        } else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.label(
+                    RichText::new("No XML loaded")
+                        .color(Theme::TEXT_MUTED)
+                        .italics(),
+                );
             });
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1111,7 +1135,6 @@ impl MainPanel {
         let cleared_exi = self.exi_data.take().is_some();
         self.pending_json_export = None;
         self.status_data.compressed_size = 0;
-        self.invalidate_raw_xml_cache();
         cleared_exi
     }
 

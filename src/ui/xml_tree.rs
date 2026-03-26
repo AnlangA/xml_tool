@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use egui::{FontId, RichText, Ui};
 
+use crate::cache::{SearchCache, SearchKey, SearchResults};
 use crate::xml::{XmlElement, XmlNode, truncate_str};
 
 use super::theme::Theme;
@@ -22,10 +25,20 @@ pub struct SelectedNodeInfo {
 // XmlTreeView
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 pub struct XmlTreeView {
     selected_id: Option<u64>,
     selected_info: Option<SelectedNodeInfo>,
+    search_cache: SearchCache,
+}
+
+impl Default for XmlTreeView {
+    fn default() -> Self {
+        Self {
+            selected_id: None,
+            selected_info: None,
+            search_cache: SearchCache::new(32),
+        }
+    }
 }
 
 impl XmlTreeView {
@@ -38,16 +51,19 @@ impl XmlTreeView {
         &mut self,
         ui: &mut Ui,
         root: &XmlNode,
+        doc_version: u64,
         query: &str,
         case_sensitive: bool,
     ) {
         let search = if query.is_empty() {
             None
         } else {
+            let cached_results = self.search_results_for(root, doc_version, query, case_sensitive);
             Some(SearchContext {
                 query,
                 case_sensitive,
                 folded_query: (!case_sensitive).then(|| query.to_lowercase()),
+                cached_results,
             })
         };
         self.show_node(ui, root, 0, search.as_ref());
@@ -85,9 +101,108 @@ impl XmlTreeView {
         self.selected_info = None;
     }
 
+    pub fn clear_search_cache(&mut self) {
+        self.search_cache.clear();
+    }
+
     // -----------------------------------------------------------------------
     // Private
     // -----------------------------------------------------------------------
+
+    fn search_results_for(
+        &mut self,
+        root: &XmlNode,
+        doc_version: u64,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Arc<SearchResults> {
+        let normalized_query = if case_sensitive {
+            query.to_string()
+        } else {
+            query.to_lowercase()
+        };
+        let key = SearchKey::new(normalized_query.clone(), case_sensitive, doc_version);
+
+        self.search_cache.get_or_insert_with(key, || {
+            Arc::new(Self::build_search_results(
+                root,
+                &normalized_query,
+                case_sensitive,
+            ))
+        })
+    }
+
+    fn build_search_results(root: &XmlNode, query: &str, case_sensitive: bool) -> SearchResults {
+        let matcher = SearchMatcher {
+            query,
+            case_sensitive,
+        };
+        let mut visible_elements = Vec::new();
+        let mut name_matches = Vec::new();
+
+        Self::collect_search_matches(root, &matcher, &mut visible_elements, &mut name_matches);
+        visible_elements.sort_unstable();
+        visible_elements.dedup();
+        name_matches.sort_unstable();
+        name_matches.dedup();
+
+        SearchResults {
+            visible_elements,
+            name_matches,
+        }
+    }
+
+    fn collect_search_matches(
+        node: &XmlNode,
+        matcher: &SearchMatcher<'_>,
+        visible_elements: &mut Vec<u64>,
+        name_matches: &mut Vec<u64>,
+    ) -> bool {
+        match node {
+            XmlNode::Element(elem) => {
+                let mut subtree_matches = false;
+
+                if matcher.matches(&elem.name) {
+                    name_matches.push(elem.id.0);
+                    subtree_matches = true;
+                }
+
+                if elem
+                    .attributes
+                    .iter()
+                    .any(|attr| matcher.matches(&attr.name) || matcher.matches(&attr.value))
+                {
+                    subtree_matches = true;
+                }
+
+                if elem
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| matcher.matches(text))
+                {
+                    subtree_matches = true;
+                }
+
+                for child in &elem.children {
+                    if Self::collect_search_matches(child, matcher, visible_elements, name_matches)
+                    {
+                        subtree_matches = true;
+                    }
+                }
+
+                if subtree_matches {
+                    visible_elements.push(elem.id.0);
+                }
+
+                subtree_matches
+            }
+            XmlNode::Text(text) => {
+                let trimmed = text.trim();
+                !trimmed.is_empty() && matcher.matches(trimmed)
+            }
+            XmlNode::Comment(comment) => matcher.matches(comment),
+        }
+    }
 
     fn show_node(
         &mut self,
@@ -149,13 +264,13 @@ impl XmlTreeView {
         let is_selected = self.selected_id == Some(id);
 
         // Check if this element or any descendant matches search
-        let matches_search = search.is_none_or(|s| self.element_matches(elem, s));
+        let matches_search = search.is_none_or(|s| s.is_visible_element(id));
         if !matches_search {
             return;
         }
 
         // Highlight if matches search
-        let highlight = search.is_some_and(|s| s.matches(&elem.name));
+        let highlight = search.is_some_and(|s| s.is_name_match(id));
 
         let label = Self::format_label(elem, highlight);
 
@@ -190,43 +305,6 @@ impl XmlTreeView {
                 }
             });
         }
-    }
-
-    /// Check if element or any descendant matches search.
-    fn element_matches(&self, elem: &XmlElement, search: &SearchContext) -> bool {
-        // Check element name
-        if search.matches(&elem.name) {
-            return true;
-        }
-
-        // Check attributes
-        for attr in &elem.attributes {
-            if search.matches(&attr.name) || search.matches(&attr.value) {
-                return true;
-            }
-        }
-
-        // Check text content
-        if let Some(text) = &elem.text
-            && search.matches(text)
-        {
-            return true;
-        }
-
-        // Recursively check children
-        for child in &elem.children {
-            if let XmlNode::Element(child_elem) = child {
-                if self.element_matches(child_elem, search) {
-                    return true;
-                }
-            } else if let XmlNode::Text(t) = child
-                && search.matches(t)
-            {
-                return true;
-            }
-        }
-
-        false
     }
 
     fn select_element(&mut self, elem: &XmlElement) {
@@ -302,9 +380,18 @@ struct SearchContext<'a> {
     query: &'a str,
     case_sensitive: bool,
     folded_query: Option<String>,
+    cached_results: Arc<SearchResults>,
 }
 
 impl SearchContext<'_> {
+    fn is_visible_element(&self, id: u64) -> bool {
+        self.cached_results.contains_visible_element(id)
+    }
+
+    fn is_name_match(&self, id: u64) -> bool {
+        self.cached_results.contains_name_match(id)
+    }
+
     fn matches(&self, text: &str) -> bool {
         if self.case_sensitive {
             text.contains(self.query)
@@ -316,8 +403,74 @@ impl SearchContext<'_> {
     }
 }
 
+struct SearchMatcher<'a> {
+    query: &'a str,
+    case_sensitive: bool,
+}
+
+impl SearchMatcher<'_> {
+    fn matches(&self, text: &str) -> bool {
+        if self.case_sensitive {
+            text.contains(self.query)
+        } else {
+            text.to_lowercase().contains(self.query)
+        }
+    }
+}
+
 /// Convert tree depth to left-padding pixels.
 #[inline]
 fn indent_px(depth: usize) -> f32 {
     5.0 + depth as f32 * 16.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xml::{XmlAttribute, XmlElement};
+
+    fn sample_tree() -> XmlNode {
+        let mut root = XmlElement::new("root".to_string());
+        let mut branch = XmlElement::new("branch".to_string());
+        let mut item = XmlElement::new("NeedleItem".to_string());
+        item.attributes.push(XmlAttribute {
+            name: "kind".to_string(),
+            value: "needle".to_string(),
+            namespace: None,
+        });
+        branch.children.push(XmlNode::Element(item));
+        root.children.push(XmlNode::Element(branch));
+        XmlNode::Element(root)
+    }
+
+    #[test]
+    fn search_results_keep_matching_ancestors_visible() {
+        let root = sample_tree();
+        let root_elem = root.as_element().expect("root element");
+        let branch_elem = root_elem.children[0].as_element().expect("branch element");
+        let item_elem = branch_elem.children[0].as_element().expect("item element");
+
+        let mut view = XmlTreeView::new();
+        let results = view.search_results_for(&root, 0, "needle", false);
+
+        assert!(results.contains_visible_element(root_elem.id.0));
+        assert!(results.contains_visible_element(branch_elem.id.0));
+        assert!(results.contains_visible_element(item_elem.id.0));
+        assert!(results.contains_name_match(item_elem.id.0));
+        assert!(!results.contains_name_match(branch_elem.id.0));
+    }
+
+    #[test]
+    fn search_results_are_cached_by_version_and_query() {
+        let root = sample_tree();
+        let mut view = XmlTreeView::new();
+
+        let first = view.search_results_for(&root, 0, "needle", false);
+        let second = view.search_results_for(&root, 0, "needle", false);
+        let different_version = view.search_results_for(&root, 1, "needle", false);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &different_version));
+        assert_eq!(view.search_cache.len(), 2);
+    }
 }
