@@ -253,10 +253,7 @@ fn write_node(node: &XmlNode, out: &mut String, depth: usize) {
                 .iter()
                 .any(|child| !matches!(child, XmlNode::Element(_)));
 
-            if !has_text && !has_children {
-                write_element_inline(elem, out);
-                out.push('\n');
-            } else if has_text || has_mixed_children {
+            if !has_children || has_text || has_mixed_children {
                 write_element_inline(elem, out);
                 out.push('\n');
             } else {

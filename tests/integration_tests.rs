@@ -351,6 +351,23 @@ fn test_export_to_json() {
 }
 
 #[test]
+fn test_export_to_json_preserves_mixed_content_order() {
+    let xml = r#"<root>Hello <child>world</child><!--note--> &amp; friends</root>"#;
+
+    let doc = parse_xml(xml).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&export_to_json(&doc).unwrap()).unwrap();
+    let content = json
+        .get("@content")
+        .and_then(serde_json::Value::as_array)
+        .expect("mixed content array");
+
+    assert_eq!(content[0]["@text"], "Hello ");
+    assert_eq!(content[1]["child"]["@text"], "world");
+    assert_eq!(content[2]["@comment"], "note");
+    assert_eq!(content[3]["@text"], " & friends");
+}
+
+#[test]
 fn test_exi_round_trip_preserves_comments_and_prefixes() {
     let xml = r#"<ns:root xmlns:ns="urn:test"><!--note--><ns:child ns:attr="value">text</ns:child></ns:root>"#;
 

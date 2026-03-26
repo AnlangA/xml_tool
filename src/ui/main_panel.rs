@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use egui::text::LayoutJob;
-use egui::{Context, FontId, Frame, Key, Margin, Modifiers, RichText};
+use egui::{Context, FontId, Frame, Key, Margin, Modifiers, RichText, Window};
 
 use crate::exi::{decode_exi_to_xml, encode_xml_to_exi};
 use crate::export::export_to_json;
@@ -21,6 +21,68 @@ use super::xml_tree::{SelectedNodeInfo, XmlTreeView};
 pub enum FileType {
     Xml,
     Exi,
+}
+
+#[derive(Debug, Clone)]
+struct DocumentSnapshot {
+    document: XmlDocument,
+    exi_data: Option<Vec<u8>>,
+    pending_json_export: Option<String>,
+    original_size: usize,
+    compressed_size: usize,
+}
+
+#[derive(Default)]
+struct DocumentHistory {
+    undo_stack: Vec<DocumentSnapshot>,
+    redo_stack: Vec<DocumentSnapshot>,
+    saved_doc_version: Option<u64>,
+}
+
+impl DocumentHistory {
+    fn reset_saved(&mut self, doc: Option<&XmlDocument>) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.saved_doc_version = doc.map(XmlDocument::version);
+    }
+
+    fn push_undo(&mut self, snapshot: DocumentSnapshot) {
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+    }
+
+    fn push_redo(&mut self, snapshot: DocumentSnapshot) {
+        self.redo_stack.push(snapshot);
+    }
+
+    fn pop_undo(&mut self) -> Option<DocumentSnapshot> {
+        self.undo_stack.pop()
+    }
+
+    fn pop_redo(&mut self) -> Option<DocumentSnapshot> {
+        self.redo_stack.pop()
+    }
+
+    fn mark_saved(&mut self, doc: Option<&XmlDocument>) {
+        self.saved_doc_version = doc.map(XmlDocument::version);
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PendingUnsavedAction {
+    OpenDialog(FileDialogAction),
+    LoadXml(PathBuf),
+    LoadExi(PathBuf),
+    DecompressFromExi,
+    Quit,
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +106,10 @@ pub struct MainPanel {
     show_raw_xml: bool,
     syntax_highlighter: SyntaxHighlighter,
     detail_editor: DetailEditorState,
+    history: DocumentHistory,
     pending_delete_confirmation: Option<u64>,
+    pending_unsaved_action: Option<PendingUnsavedAction>,
+    allow_unsaved_close_once: bool,
 
     // Status bar
     status_data: StatusBarData,
@@ -146,7 +211,10 @@ impl MainPanel {
             show_raw_xml: false,
             syntax_highlighter: SyntaxHighlighter::new(),
             detail_editor: DetailEditorState::default(),
+            history: DocumentHistory::default(),
             pending_delete_confirmation: None,
+            pending_unsaved_action: None,
+            allow_unsaved_close_once: false,
 
             status_data,
 
@@ -155,11 +223,21 @@ impl MainPanel {
     }
 
     pub fn show(&mut self, ctx: &Context) {
+        self.handle_close_request(ctx);
         self.handle_shortcuts(ctx);
-        self.poll_file_dialog();
+        self.poll_file_dialog(ctx);
+        if self.pending_unsaved_action.is_some()
+            && !self.has_unsaved_changes()
+            && !self.file_dialog.is_pending()
+            && let Some(action) = self.pending_unsaved_action.take()
+        {
+            self.perform_pending_action(ctx, action);
+        }
+        self.status_data.is_dirty = self.has_unsaved_changes();
         self.show_menu_bar(ctx);
         show_status_bar(ctx, &self.status_data);
         self.show_body(ctx);
+        self.show_unsaved_changes_dialog(ctx);
 
         // Show shortcuts panel if visible
         self.shortcuts_panel.show(ctx);
@@ -178,16 +256,32 @@ impl MainPanel {
         let ctrl_e = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::E);
         let ctrl_s = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::S);
         let ctrl_f = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::F);
+        let ctrl_z = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::Z);
+        let ctrl_shift_z = egui::KeyboardShortcut::new(
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+            Key::Z,
+        );
+        let ctrl_y = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::Y);
         let ctrl_q = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::Q);
         let f1 = egui::KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
         // Ctrl+O: Open XML
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_o)) {
-            self.open_file_dialog(FileDialogAction::OpenXml);
+            self.request_unsaved_action(
+                ctx,
+                PendingUnsavedAction::OpenDialog(FileDialogAction::OpenXml),
+            );
         }
         // Ctrl+E: Open EXI
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_e)) {
-            self.open_file_dialog(FileDialogAction::OpenExi);
+            self.request_unsaved_action(
+                ctx,
+                PendingUnsavedAction::OpenDialog(FileDialogAction::OpenExi),
+            );
         }
         // Ctrl+S: Save XML
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_s)) && self.current_document.is_some() {
@@ -197,6 +291,15 @@ impl MainPanel {
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_f)) {
             self.search_bar.focus();
         }
+        // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_z)) {
+            self.undo_last_change();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_shift_z))
+            || ctx.input_mut(|i| i.consume_shortcut(&ctrl_y))
+        {
+            self.redo_last_change();
+        }
         // Esc: Clear search
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) && self.search_bar.clear()
         {
@@ -204,7 +307,7 @@ impl MainPanel {
         }
         // Ctrl+Q: Quit application
         if ctx.input_mut(|i| i.consume_shortcut(&ctrl_q)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.request_unsaved_action(ctx, PendingUnsavedAction::Quit);
         }
         // F1: Show shortcuts help
         if ctx.input_mut(|i| i.consume_shortcut(&f1)) {
@@ -216,13 +319,30 @@ impl MainPanel {
     // File dialog
     // -----------------------------------------------------------------------
 
-    fn poll_file_dialog(&mut self) {
+    fn poll_file_dialog(&mut self, ctx: &Context) {
         if let Some(result) = self.file_dialog.poll() {
             match result {
-                FileDialogResult::OpenXml(Some(p)) => self.load_xml(&p),
-                FileDialogResult::OpenExi(Some(p)) => self.load_exi(&p),
-                FileDialogResult::SaveXml(Some(p)) => self.save_xml(&p),
-                FileDialogResult::SaveExi(Some(p)) => self.save_exi(&p),
+                FileDialogResult::OpenXml(Some(p)) => {
+                    self.request_unsaved_action(ctx, PendingUnsavedAction::LoadXml(p))
+                }
+                FileDialogResult::OpenExi(Some(p)) => {
+                    self.request_unsaved_action(ctx, PendingUnsavedAction::LoadExi(p))
+                }
+                FileDialogResult::SaveXml(Some(p)) => {
+                    if self.save_xml(&p)
+                        && let Some(action) = self.pending_unsaved_action.take()
+                    {
+                        self.perform_pending_action(ctx, action);
+                    }
+                }
+                FileDialogResult::SaveExi(Some(p)) => {
+                    let _ = self.save_exi(&p);
+                }
+                FileDialogResult::SaveXml(None) if self.pending_unsaved_action.is_some() => {
+                    self.set_status("Save cancelled — choose save, discard, or cancel.");
+                }
+                FileDialogResult::SaveXml(None) => {}
+                FileDialogResult::SaveExi(None) => self.set_status("EXI save cancelled."),
                 FileDialogResult::SaveJson(Some(p)) => self.save_json(&p),
                 FileDialogResult::SaveJson(None) => {
                     self.pending_json_export = None;
@@ -258,6 +378,7 @@ impl MainPanel {
                 self.xml_tree_view.clear_selection();
                 self.detail_editor.clear();
                 self.invalidate_raw_xml_cache();
+                self.history.reset_saved(self.current_document.as_ref());
                 self.update_file_name(path);
                 self.set_status(format!("Opened: {}", path.display()));
             }
@@ -281,6 +402,7 @@ impl MainPanel {
                     self.xml_tree_view.clear_selection();
                     self.detail_editor.clear();
                     self.invalidate_raw_xml_cache();
+                    self.history.reset_saved(self.current_document.as_ref());
                     self.update_file_name(path);
                     self.set_status(format!("Opened EXI: {}", path.display()));
                 }
@@ -331,32 +453,56 @@ impl MainPanel {
                 self.detail_editor.clear();
                 self.pending_json_export = None;
                 self.invalidate_raw_xml_cache();
+                self.history.reset_saved(self.current_document.as_ref());
                 self.set_status("Decompressed from EXI.");
             }
             Err(e) => self.set_status(format!("Decompression error: {e}")),
         }
     }
 
-    fn save_xml(&mut self, path: &PathBuf) {
+    fn save_xml(&mut self, path: &PathBuf) -> bool {
         let Some(doc) = &self.current_document else {
-            return;
+            return false;
         };
         match serialize_xml(doc) {
             Ok(xml_str) => match std::fs::write(path, &xml_str) {
-                Ok(_) => self.set_status(format!("Saved XML: {}", path.display())),
-                Err(e) => self.set_status(format!("Write error: {e}")),
+                Ok(_) => {
+                    self.current_file_path = Some(path.clone());
+                    self.current_file_type = FileType::Xml;
+                    self.history.mark_saved(self.current_document.as_ref());
+                    self.update_file_name(path);
+                    self.set_status(format!("Saved XML: {}", path.display()));
+                    true
+                }
+                Err(e) => {
+                    self.set_status(format!("Write error: {e}"));
+                    false
+                }
             },
-            Err(e) => self.set_status(format!("Serialisation error: {e}")),
+            Err(e) => {
+                self.set_status(format!("Serialisation error: {e}"));
+                false
+            }
         }
     }
 
-    fn save_exi(&mut self, path: &PathBuf) {
+    fn save_exi(&mut self, path: &PathBuf) -> bool {
         let Some(exi) = &self.exi_data else {
-            return;
+            return false;
         };
         match std::fs::write(path, exi) {
-            Ok(_) => self.set_status(format!("Saved EXI: {}", path.display())),
-            Err(e) => self.set_status(format!("Write error: {e}")),
+            Ok(_) => {
+                self.current_file_path = Some(path.clone());
+                self.current_file_type = FileType::Exi;
+                self.history.mark_saved(self.current_document.as_ref());
+                self.update_file_name(path);
+                self.set_status(format!("Saved EXI: {}", path.display()));
+                true
+            }
+            Err(e) => {
+                self.set_status(format!("Write error: {e}"));
+                false
+            }
         }
     }
 
@@ -408,11 +554,17 @@ impl MainPanel {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
                         if ui.button("Open XML… (Ctrl+O)").clicked() {
-                            self.open_file_dialog(FileDialogAction::OpenXml);
+                            self.request_unsaved_action(
+                                ctx,
+                                PendingUnsavedAction::OpenDialog(FileDialogAction::OpenXml),
+                            );
                             ui.close();
                         }
                         if ui.button("Open EXI… (Ctrl+E)").clicked() {
-                            self.open_file_dialog(FileDialogAction::OpenExi);
+                            self.request_unsaved_action(
+                                ctx,
+                                PendingUnsavedAction::OpenDialog(FileDialogAction::OpenExi),
+                            );
                             ui.close();
                         }
                         ui.separator();
@@ -430,8 +582,24 @@ impl MainPanel {
                         });
                         ui.separator();
                         if ui.button("Quit (Ctrl+Q)").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            self.request_unsaved_action(ctx, PendingUnsavedAction::Quit);
+                            ui.close();
                         }
+                    });
+
+                    ui.menu_button("Edit", |ui| {
+                        ui.add_enabled_ui(self.history.can_undo(), |ui| {
+                            if ui.button("Undo (Ctrl+Z)").clicked() {
+                                self.undo_last_change();
+                                ui.close();
+                            }
+                        });
+                        ui.add_enabled_ui(self.history.can_redo(), |ui| {
+                            if ui.button("Redo (Ctrl+Shift+Z)").clicked() {
+                                self.redo_last_change();
+                                ui.close();
+                            }
+                        });
                     });
 
                     ui.menu_button("Tools", |ui| {
@@ -443,7 +611,10 @@ impl MainPanel {
                         });
                         ui.add_enabled_ui(self.exi_data.is_some(), |ui| {
                             if ui.button("📦 Decompress from EXI").clicked() {
-                                self.decompress_from_exi();
+                                self.request_unsaved_action(
+                                    ctx,
+                                    PendingUnsavedAction::DecompressFromExi,
+                                );
                                 ui.close();
                             }
                         });
@@ -480,7 +651,10 @@ impl MainPanel {
 
                         ui.add_enabled_ui(has_exi, |ui| {
                             if ui.button("◀ Decompress").clicked() {
-                                self.decompress_from_exi();
+                                self.request_unsaved_action(
+                                    ctx,
+                                    PendingUnsavedAction::DecompressFromExi,
+                                );
                             }
                         });
 
@@ -610,7 +784,10 @@ impl MainPanel {
                 );
                 ui.add_space(20.0);
                 if ui.button("📂 Open XML File").clicked() {
-                    self.open_file_dialog(FileDialogAction::OpenXml);
+                    self.request_unsaved_action(
+                        ui.ctx(),
+                        PendingUnsavedAction::OpenDialog(FileDialogAction::OpenXml),
+                    );
                 }
                 ui.add_space(8.0);
                 ui.label(
@@ -1065,6 +1242,179 @@ impl MainPanel {
         self.status_data.set_message(msg);
     }
 
+    fn handle_close_request(&mut self, ctx: &Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+
+        if self.allow_unsaved_close_once {
+            self.allow_unsaved_close_once = false;
+            return;
+        }
+
+        if self.has_unsaved_changes() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !matches!(
+                self.pending_unsaved_action,
+                Some(PendingUnsavedAction::Quit)
+            ) {
+                self.pending_unsaved_action = Some(PendingUnsavedAction::Quit);
+                self.set_status("Unsaved changes — save or discard before closing.");
+            }
+        }
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        match (&self.current_document, self.history.saved_doc_version) {
+            (Some(doc), Some(saved_version)) => doc.version() != saved_version,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    fn capture_document_snapshot(&self) -> Option<DocumentSnapshot> {
+        Some(DocumentSnapshot {
+            document: self.current_document.clone()?,
+            exi_data: self.exi_data.clone(),
+            pending_json_export: self.pending_json_export.clone(),
+            original_size: self.status_data.original_size,
+            compressed_size: self.status_data.compressed_size,
+        })
+    }
+
+    fn restore_document_snapshot(&mut self, snapshot: DocumentSnapshot) {
+        self.current_document = Some(snapshot.document);
+        self.exi_data = snapshot.exi_data;
+        self.pending_json_export = snapshot.pending_json_export;
+        self.status_data.original_size = snapshot.original_size;
+        self.status_data.compressed_size = snapshot.compressed_size;
+        self.clear_delete_confirmation();
+        self.xml_tree_view.clear_search_cache();
+        self.invalidate_raw_xml_cache();
+        self.sync_selection_from_document();
+    }
+
+    fn push_undo_snapshot(&mut self, snapshot: Option<DocumentSnapshot>) {
+        if let Some(snapshot) = snapshot {
+            self.history.push_undo(snapshot);
+        }
+    }
+
+    fn request_unsaved_action(&mut self, ctx: &Context, action: PendingUnsavedAction) {
+        if self.has_unsaved_changes() {
+            if matches!(action, PendingUnsavedAction::Quit) {
+                self.pending_unsaved_action = Some(PendingUnsavedAction::Quit);
+                self.set_status("Unsaved changes — save or discard before closing.");
+            } else if self.pending_unsaved_action.is_none() {
+                self.pending_unsaved_action = Some(action);
+                self.set_status("Unsaved changes — save or discard before continuing.");
+            }
+            if matches!(
+                self.pending_unsaved_action,
+                Some(PendingUnsavedAction::Quit)
+            ) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            return;
+        }
+
+        self.perform_pending_action(ctx, action);
+    }
+
+    fn discard_unsaved_changes_and_continue(
+        &mut self,
+        ctx: &Context,
+        action: PendingUnsavedAction,
+    ) {
+        self.pending_unsaved_action = None;
+        self.allow_unsaved_close_once = matches!(action, PendingUnsavedAction::Quit);
+        self.perform_pending_action(ctx, action);
+    }
+
+    fn perform_pending_action(&mut self, ctx: &Context, action: PendingUnsavedAction) {
+        match action {
+            PendingUnsavedAction::OpenDialog(action) => self.open_file_dialog(action),
+            PendingUnsavedAction::LoadXml(path) => self.load_xml(&path),
+            PendingUnsavedAction::LoadExi(path) => self.load_exi(&path),
+            PendingUnsavedAction::DecompressFromExi => self.decompress_from_exi(),
+            PendingUnsavedAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    fn show_unsaved_changes_dialog(&mut self, ctx: &Context) {
+        let Some(action) = self.pending_unsaved_action.clone() else {
+            return;
+        };
+
+        Window::new("Unsaved changes")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("You have unsaved XML edits.")
+                        .strong()
+                        .color(Theme::WARNING),
+                );
+                ui.add_space(8.0);
+                ui.label("Save the current document, discard the changes, or cancel this action.");
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let save_label = if self.file_dialog.is_pending() {
+                        "Saving…"
+                    } else {
+                        "Save XML As…"
+                    };
+                    if ui
+                        .add_enabled(
+                            self.current_document.is_some() && !self.file_dialog.is_pending(),
+                            egui::Button::new(save_label),
+                        )
+                        .clicked()
+                    {
+                        self.open_file_dialog(FileDialogAction::SaveXml);
+                    }
+
+                    if ui.button("Discard Changes").clicked() {
+                        self.discard_unsaved_changes_and_continue(ctx, action);
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        self.pending_unsaved_action = None;
+                        self.set_status("Kept the current document unchanged.");
+                    }
+                });
+            });
+    }
+
+    fn undo_last_change(&mut self) {
+        self.clear_delete_confirmation();
+        let Some(previous) = self.history.pop_undo() else {
+            self.set_status("Nothing to undo.");
+            return;
+        };
+        let current = self.capture_document_snapshot();
+        self.restore_document_snapshot(previous);
+        if let Some(current) = current {
+            self.history.push_redo(current);
+        }
+        self.set_status("Undid the last document change.");
+    }
+
+    fn redo_last_change(&mut self) {
+        self.clear_delete_confirmation();
+        let Some(next) = self.history.pop_redo() else {
+            self.set_status("Nothing to redo.");
+            return;
+        };
+        let current = self.capture_document_snapshot();
+        self.restore_document_snapshot(next);
+        if let Some(current) = current {
+            self.history.push_undo(current);
+        }
+        self.set_status("Redid the last document change.");
+    }
+
     fn select_adjacent_search_match(&mut self, backwards: bool) {
         let query = self.search_bar.query.clone();
         if query.is_empty() {
@@ -1115,6 +1465,7 @@ impl MainPanel {
         let draft_name = self.detail_editor.element_name.clone();
         let draft_attribute_values = self.detail_editor.attribute_values.clone();
         let draft_text = self.detail_editor.text_content.clone();
+        let previous_snapshot = self.capture_document_snapshot();
 
         let mut name_changed = false;
         let mut attributes_changed = false;
@@ -1158,6 +1509,7 @@ impl MainPanel {
             return;
         }
 
+        self.push_undo_snapshot(previous_snapshot);
         let cleared_exi = self.invalidate_after_document_edit();
         self.sync_selection_from_document();
 
@@ -1185,6 +1537,7 @@ impl MainPanel {
 
         let attribute_name = self.detail_editor.new_attribute_name.trim().to_string();
         let attribute_value = self.detail_editor.new_attribute_value.clone();
+        let previous_snapshot = self.capture_document_snapshot();
 
         let add_result = match self.current_document.as_mut() {
             Some(doc) => doc.add_attribute(selected_id, attribute_name.clone(), attribute_value),
@@ -1196,6 +1549,7 @@ impl MainPanel {
 
         match add_result {
             Ok(true) => {
+                self.push_undo_snapshot(previous_snapshot);
                 self.detail_editor.new_attribute_name.clear();
                 self.detail_editor.new_attribute_value.clear();
                 let cleared_exi = self.invalidate_after_document_edit();
@@ -1218,6 +1572,7 @@ impl MainPanel {
             self.set_status("No element selected.");
             return;
         };
+        let previous_snapshot = self.capture_document_snapshot();
 
         let removed = match self.current_document.as_mut() {
             Some(doc) => doc.remove_attribute(selected_id, attribute_name),
@@ -1232,6 +1587,7 @@ impl MainPanel {
             return;
         }
 
+        self.push_undo_snapshot(previous_snapshot);
         let cleared_exi = self.invalidate_after_document_edit();
         self.sync_selection_from_document();
         self.set_status(
@@ -1247,6 +1603,7 @@ impl MainPanel {
         };
 
         let child_name = self.detail_editor.new_child_name.trim().to_string();
+        let previous_snapshot = self.capture_document_snapshot();
         let add_result = match self.current_document.as_mut() {
             Some(doc) => doc.append_child_element(selected_id, child_name.clone()),
             None => {
@@ -1257,6 +1614,7 @@ impl MainPanel {
 
         match add_result {
             Ok(Some(child_id)) => {
+                self.push_undo_snapshot(previous_snapshot);
                 self.detail_editor.new_child_name.clear();
                 let cleared_exi = self.invalidate_after_document_edit();
                 self.select_document_node(Some(child_id));
@@ -1280,6 +1638,7 @@ impl MainPanel {
         };
 
         let sibling_name = self.detail_editor.new_sibling_name.trim().to_string();
+        let previous_snapshot = self.capture_document_snapshot();
         let add_result = match self.current_document.as_mut() {
             Some(doc) => doc.insert_sibling_element_after(selected_id, sibling_name.clone()),
             None => {
@@ -1290,6 +1649,7 @@ impl MainPanel {
 
         match add_result {
             Ok(Some(sibling_id)) => {
+                self.push_undo_snapshot(previous_snapshot);
                 self.detail_editor.new_sibling_name.clear();
                 let cleared_exi = self.invalidate_after_document_edit();
                 self.select_document_node(Some(sibling_id));
@@ -1317,6 +1677,7 @@ impl MainPanel {
             self.set_status("No element selected.");
             return;
         };
+        let previous_snapshot = self.capture_document_snapshot();
 
         let move_result = match self.current_document.as_mut() {
             Some(doc) => {
@@ -1334,6 +1695,7 @@ impl MainPanel {
 
         match move_result {
             Ok(true) => {
+                self.push_undo_snapshot(previous_snapshot);
                 let cleared_exi = self.invalidate_after_document_edit();
                 self.select_document_node(Some(selected_id));
                 self.set_status(self.with_exi_notice(
@@ -1375,6 +1737,7 @@ impl MainPanel {
             self.set_status("No element selected.");
             return;
         };
+        let previous_snapshot = self.capture_document_snapshot();
 
         let remove_result = match self.current_document.as_mut() {
             Some(doc) => doc.remove_element(selected_id),
@@ -1386,6 +1749,7 @@ impl MainPanel {
 
         match remove_result {
             Ok(Some(parent_id)) => {
+                self.push_undo_snapshot(previous_snapshot);
                 let cleared_exi = self.invalidate_after_document_edit();
                 self.select_document_node(Some(parent_id));
                 self.set_status(
@@ -1456,5 +1820,132 @@ impl MainPanel {
 
     fn update_file_name(&mut self, path: &std::path::Path) {
         self.status_data.file_name = path.file_name().and_then(|n| n.to_str()).map(String::from);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xml::parse_xml;
+    use tempfile::NamedTempFile;
+
+    fn child_id(panel: &MainPanel) -> u64 {
+        panel
+            .current_document
+            .as_ref()
+            .and_then(|doc| doc.root.as_element())
+            .and_then(|root| root.children[0].as_element())
+            .expect("child element")
+            .id
+            .0
+    }
+
+    fn panel_with_document(xml: &str) -> MainPanel {
+        let mut panel = MainPanel::new();
+        panel.current_document = Some(parse_xml(xml).expect("parse xml"));
+        panel.history.reset_saved(panel.current_document.as_ref());
+        panel
+    }
+
+    #[test]
+    fn undo_and_redo_restore_dirty_state() {
+        let mut panel = panel_with_document(r#"<root><child/></root>"#);
+        let node_id = child_id(&panel);
+        let previous = panel.capture_document_snapshot();
+
+        panel
+            .current_document
+            .as_mut()
+            .expect("document")
+            .rename_element(node_id, "renamed".to_string())
+            .expect("rename");
+        panel.push_undo_snapshot(previous);
+
+        assert!(panel.has_unsaved_changes());
+
+        panel.undo_last_change();
+        assert!(!panel.has_unsaved_changes());
+        assert_eq!(
+            panel
+                .current_document
+                .as_ref()
+                .and_then(|doc| doc.find_element(node_id))
+                .map(|e| e.name.as_str()),
+            Some("child")
+        );
+
+        panel.redo_last_change();
+        assert!(panel.has_unsaved_changes());
+        assert_eq!(
+            panel
+                .current_document
+                .as_ref()
+                .and_then(|doc| doc.find_element(node_id))
+                .map(|e| e.name.as_str()),
+            Some("renamed")
+        );
+    }
+
+    #[test]
+    fn request_unsaved_action_queues_prompt_when_dirty() {
+        let mut panel = panel_with_document(r#"<root><child/></root>"#);
+        let node_id = child_id(&panel);
+        panel
+            .current_document
+            .as_mut()
+            .expect("document")
+            .rename_element(node_id, "renamed".to_string())
+            .expect("rename");
+
+        let ctx = Context::default();
+        panel.request_unsaved_action(&ctx, PendingUnsavedAction::Quit);
+
+        assert!(matches!(
+            panel.pending_unsaved_action,
+            Some(PendingUnsavedAction::Quit)
+        ));
+    }
+
+    #[test]
+    fn discard_quit_allows_one_close_without_saving() {
+        let mut panel = panel_with_document(r#"<root><child/></root>"#);
+        let node_id = child_id(&panel);
+        panel
+            .current_document
+            .as_mut()
+            .expect("document")
+            .rename_element(node_id, "renamed".to_string())
+            .expect("rename");
+        panel.pending_unsaved_action = Some(PendingUnsavedAction::Quit);
+
+        let ctx = Context::default();
+        panel.discard_unsaved_changes_and_continue(&ctx, PendingUnsavedAction::Quit);
+
+        assert!(panel.pending_unsaved_action.is_none());
+        assert!(panel.allow_unsaved_close_once);
+        assert!(panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn save_xml_marks_document_clean() {
+        let mut panel = panel_with_document(r#"<root><child/></root>"#);
+        let node_id = child_id(&panel);
+        let previous = panel.capture_document_snapshot();
+
+        panel
+            .current_document
+            .as_mut()
+            .expect("document")
+            .rename_element(node_id, "renamed".to_string())
+            .expect("rename");
+        panel.push_undo_snapshot(previous);
+
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        assert!(panel.save_xml(&path));
+        assert!(!panel.has_unsaved_changes());
+        assert_eq!(panel.current_file_path.as_ref(), Some(&path));
+        assert_eq!(panel.current_file_type, FileType::Xml);
     }
 }

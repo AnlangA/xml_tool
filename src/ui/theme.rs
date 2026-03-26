@@ -61,7 +61,7 @@ impl Theme {
     pub const ATTRIBUTE_VALUE: Color32 = Self::PEACH;
     pub const TEXT_CONTENT: Color32 = Self::TEXT;
     pub const COMMENT: Color32 = Color32::from_rgb(108, 135, 108);
-    
+
     // Syntax highlighting colors (for raw XML view)
     pub const SYNTAX_TAG: Color32 = Self::GREEN;
     pub const SYNTAX_TAG_BRACKET: Color32 = Self::OVERLAY1;
@@ -71,12 +71,12 @@ impl Theme {
     pub const SYNTAX_COMMENT: Color32 = Self::OVERLAY0;
     pub const SYNTAX_TEXT: Color32 = Self::TEXT;
     pub const SYNTAX_KEYWORD: Color32 = Self::MAUVE;
-    
+
     // Interactive states
     pub const HOVER_BG: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
     pub const ACTIVE_BG: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 20);
     pub const FOCUS_BORDER: Color32 = Self::LAVENDER;
-    
+
     // Status backgrounds
     pub const SUCCESS_BG: Color32 = Color32::from_rgba_premultiplied(166, 227, 161, 30);
     pub const WARNING_BG: Color32 = Color32::from_rgba_premultiplied(249, 226, 175, 30);

@@ -131,9 +131,9 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
 }
 
 fn highlight_tag_like_markup(result: &mut Vec<(Color32, String)>, markup: &str) {
-    if markup.starts_with("</") {
+    if let Some(markup) = markup.strip_prefix("</") {
         push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "</");
-        highlight_markup_body(result, &markup[2..], AppTheme::SYNTAX_TAG, ">");
+        highlight_markup_body(result, markup, AppTheme::SYNTAX_TAG, ">");
     } else {
         push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "<");
         highlight_markup_body(result, &markup[1..], AppTheme::SYNTAX_TAG, ">");

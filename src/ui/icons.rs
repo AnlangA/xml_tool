@@ -1,7 +1,7 @@
-/// Icon constants using Unicode symbols and egui_phosphor
-///
-/// This module provides a centralized location for all icons used in the application.
-/// We use a mix of Unicode symbols (for compatibility) and Phosphor icons (for modern look).
+//! Icon constants using Unicode symbols and `egui_phosphor`.
+//!
+//! This module centralizes the iconography used across the application.
+//! It mixes broadly supported Unicode symbols with optional Phosphor icons.
 
 pub struct Icons;
 

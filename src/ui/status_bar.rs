@@ -9,6 +9,7 @@ use super::theme::Theme;
 pub struct StatusBarData {
     pub message: String,
     pub file_name: Option<String>,
+    pub is_dirty: bool,
     pub original_size: usize,
     pub compressed_size: usize,
 }
@@ -40,6 +41,11 @@ pub fn show_status_bar(ctx: &egui::Context, data: &StatusBarData) {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if data.is_dirty {
+                        ui.label(RichText::new("● Unsaved").small().color(Theme::WARNING));
+                        ui.separator();
+                    }
+
                     if let Some(name) = &data.file_name {
                         ui.label(
                             RichText::new(format!("📄 {name}"))

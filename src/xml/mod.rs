@@ -1,3 +1,5 @@
+//! XML parsing, serialization, and editable tree-model primitives.
+
 pub mod parser;
 pub mod tree;
 

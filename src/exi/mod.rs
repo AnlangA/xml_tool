@@ -1,3 +1,5 @@
+//! EXI encode/decode helpers built on top of the XML document model.
+
 mod decoder;
 mod encoder;
 
