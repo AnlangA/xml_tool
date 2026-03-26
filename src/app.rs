@@ -10,10 +10,10 @@ impl XmlToolApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Set theme
         cc.egui_ctx.set_theme(ThemePreference::Dark);
-        
+
         // Apply catppuccin mocha theme
         catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::MOCHA);
-        
+
         Self {
             main_panel: MainPanel::new(),
         }

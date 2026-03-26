@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 
-use egui::{Color32, Context, FontId, Frame, Margin, RichText};
+use egui::{Context, FontId, Frame, Key, Margin, Modifiers, RichText};
 
 use crate::exi::{decode_exi_to_xml, encode_xml_to_exi};
-use crate::xml::{parse_xml_file, serialize_xml, XmlDocument};
+use crate::export::export_to_json;
+use crate::utils::compression_ratio;
+use crate::xml::{XmlDocument, parse_xml_file, serialize_xml};
 
 use super::file_dialog::{FileDialogAction, FileDialogManager, FileDialogResult};
-use super::status_bar::{show_status_bar, StatusBarData};
+use super::search_bar::SearchBar;
+use super::shortcuts_panel::ShortcutsPanel;
+use super::status_bar::{StatusBarData, show_status_bar};
+use super::syntax_highlighter::SyntaxHighlighter;
+use super::theme::Theme;
 use super::xml_tree::XmlTreeView;
 
 /// Whether the current document originated from XML or EXI.
@@ -29,8 +35,11 @@ pub struct MainPanel {
 
     // UI state
     xml_tree_view: XmlTreeView,
+    search_bar: SearchBar,
+    shortcuts_panel: ShortcutsPanel,
     raw_xml_cache: Option<String>,
     show_raw_xml: bool,
+    syntax_highlighter: SyntaxHighlighter,
 
     // Status bar
     status_data: StatusBarData,
@@ -57,8 +66,11 @@ impl MainPanel {
             exi_data: None,
 
             xml_tree_view: XmlTreeView::new(),
+            search_bar: SearchBar::new(),
+            shortcuts_panel: ShortcutsPanel::new(),
             raw_xml_cache: None,
             show_raw_xml: false,
+            syntax_highlighter: SyntaxHighlighter::new(),
 
             status_data,
 
@@ -67,14 +79,50 @@ impl MainPanel {
     }
 
     pub fn show(&mut self, ctx: &Context) {
+        self.handle_shortcuts(ctx);
         self.poll_file_dialog();
         self.show_menu_bar(ctx);
-        self.show_toolbar(ctx);
         show_status_bar(ctx, &self.status_data);
         self.show_body(ctx);
+        
+        // Show shortcuts panel if visible
+        self.shortcuts_panel.show(ctx);
 
         if self.file_dialog.is_pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Keyboard shortcuts
+    // -----------------------------------------------------------------------
+
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        let ctrl_o = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::O);
+        let ctrl_e = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::E);
+        let ctrl_s = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::S);
+        let ctrl_f = egui::KeyboardShortcut::new(Modifiers::CTRL, Key::F);
+        let f1 = egui::KeyboardShortcut::new(Modifiers::NONE, Key::F1);
+
+        // Ctrl+O: Open XML
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_o)) {
+            self.open_file_dialog(FileDialogAction::OpenXml);
+        }
+        // Ctrl+E: Open EXI
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_e)) {
+            self.open_file_dialog(FileDialogAction::OpenExi);
+        }
+        // Ctrl+S: Save XML
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_s)) && self.current_document.is_some() {
+            self.open_file_dialog(FileDialogAction::SaveXml);
+        }
+        // Ctrl+F: Focus search
+        if ctx.input_mut(|i| i.consume_shortcut(&ctrl_f)) {
+            self.search_bar.focus();
+        }
+        // F1: Show shortcuts help
+        if ctx.input_mut(|i| i.consume_shortcut(&f1)) {
+            self.shortcuts_panel.toggle();
         }
     }
 
@@ -105,8 +153,9 @@ impl MainPanel {
     fn load_xml(&mut self, path: &PathBuf) {
         match parse_xml_file(path) {
             Ok(doc) => {
-                self.status_data.original_size =
-                    std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+                self.status_data.original_size = std::fs::metadata(path)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0);
                 self.status_data.compressed_size = 0;
                 self.exi_data = None;
                 self.current_document = Some(doc);
@@ -207,6 +256,30 @@ impl MainPanel {
             Err(e) => self.set_status(format!("Write error: {e}")),
         }
     }
+    
+    fn export_to_json(&mut self) {
+        let Some(doc) = &self.current_document else {
+            self.set_status("No document loaded.");
+            return;
+        };
+        
+        match export_to_json(doc) {
+            Ok(json_str) => {
+                // Open save dialog for JSON
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("JSON Files", &["json"])
+                    .set_file_name("output.json")
+                    .save_file()
+                {
+                    match std::fs::write(&path, json_str) {
+                        Ok(_) => self.set_status(format!("Exported to JSON: {}", path.display())),
+                        Err(e) => self.set_status(format!("Write error: {e}")),
+                    }
+                }
+            }
+            Err(e) => self.set_status(format!("JSON export error: {e}")),
+        }
+    }
 
     // -----------------------------------------------------------------------
     // UI panels
@@ -222,17 +295,17 @@ impl MainPanel {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Open XML…").clicked() {
+                        if ui.button("Open XML… (Ctrl+O)").clicked() {
                             self.open_file_dialog(FileDialogAction::OpenXml);
                             ui.close();
                         }
-                        if ui.button("Open EXI…").clicked() {
+                        if ui.button("Open EXI… (Ctrl+E)").clicked() {
                             self.open_file_dialog(FileDialogAction::OpenExi);
                             ui.close();
                         }
                         ui.separator();
                         ui.add_enabled_ui(self.current_document.is_some(), |ui| {
-                            if ui.button("Save XML As…").clicked() {
+                            if ui.button("Save XML As… (Ctrl+S)").clicked() {
                                 self.open_file_dialog(FileDialogAction::SaveXml);
                                 ui.close();
                             }
@@ -244,21 +317,28 @@ impl MainPanel {
                             }
                         });
                         ui.separator();
-                        if ui.button("Quit").clicked() {
+                        if ui.button("Quit (Ctrl+Q)").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
 
                     ui.menu_button("Tools", |ui| {
                         ui.add_enabled_ui(self.current_document.is_some(), |ui| {
-                            if ui.button("Compress to EXI").clicked() {
+                            if ui.button("🗜 Compress to EXI").clicked() {
                                 self.compress_to_exi();
                                 ui.close();
                             }
                         });
                         ui.add_enabled_ui(self.exi_data.is_some(), |ui| {
-                            if ui.button("Decompress from EXI").clicked() {
+                            if ui.button("📦 Decompress from EXI").clicked() {
                                 self.decompress_from_exi();
+                                ui.close();
+                            }
+                        });
+                        ui.separator();
+                        ui.add_enabled_ui(self.current_document.is_some(), |ui| {
+                            if ui.button("📄 Export to JSON").clicked() {
+                                self.export_to_json();
                                 ui.close();
                             }
                         });
@@ -267,54 +347,36 @@ impl MainPanel {
                     ui.menu_button("View", |ui| {
                         ui.checkbox(&mut self.show_raw_xml, "Show Raw XML");
                     });
-                });
-            });
-    }
 
-    fn show_toolbar(&mut self, ctx: &Context) {
-        egui::TopBottomPanel::top("toolbar")
-            .frame(
-                Frame::default()
-                    .inner_margin(Margin::symmetric(8, 4))
-                    .fill(ctx.style().visuals.extreme_bg_color),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("📂 Open XML").clicked() {
-                        self.open_file_dialog(FileDialogAction::OpenXml);
-                    }
-                    if ui.button("📂 Open EXI").clicked() {
-                        self.open_file_dialog(FileDialogAction::OpenExi);
-                    }
-
-                    ui.separator();
-
-                    ui.add_enabled_ui(self.current_document.is_some(), |ui| {
-                        if ui.button("💾 Save XML").clicked() {
-                            self.open_file_dialog(FileDialogAction::SaveXml);
+                    ui.menu_button("Help", |ui| {
+                        if ui.button("⌨ Keyboard Shortcuts (F1)").clicked() {
+                            self.shortcuts_panel.toggle();
+                            ui.close();
                         }
-                    });
-                    ui.add_enabled_ui(self.exi_data.is_some(), |ui| {
-                        if ui.button("💾 Save EXI").clicked() {
-                            self.open_file_dialog(FileDialogAction::SaveExi);
+                        ui.separator();
+                        if ui.button("📖 About").clicked() {
+                            // TODO: Show about dialog
+                            ui.close();
                         }
                     });
 
-                    ui.separator();
-
-                    ui.add_enabled_ui(self.current_document.is_some(), |ui| {
-                        if ui.button("▶ Compress").clicked() {
-                            self.compress_to_exi();
-                        }
-                    });
-                    ui.add_enabled_ui(self.exi_data.is_some(), |ui| {
-                        if ui.button("◀ Decompress").clicked() {
-                            self.decompress_from_exi();
-                        }
-                    });
-
+                    // Quick action buttons in menu bar
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.checkbox(&mut self.show_raw_xml, "Raw XML");
+                        // Compression buttons
+                        let has_doc = self.current_document.is_some();
+                        let has_exi = self.exi_data.is_some();
+
+                        ui.add_enabled_ui(has_exi, |ui| {
+                            if ui.button("◀ Decompress").clicked() {
+                                self.decompress_from_exi();
+                            }
+                        });
+
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            if ui.button("▶ Compress").clicked() {
+                                self.compress_to_exi();
+                            }
+                        });
                     });
                 });
             });
@@ -322,7 +384,7 @@ impl MainPanel {
 
     fn show_body(&mut self, ctx: &Context) {
         egui::SidePanel::left("tree_panel")
-            .default_width(350.0)
+            .default_width(320.0)
             .min_width(200.0)
             .max_width(600.0)
             .resizable(true)
@@ -351,40 +413,61 @@ impl MainPanel {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.heading(
+                ui.label(
                     RichText::new("XML Structure")
                         .font(FontId::proportional(14.0))
-                        .strong(),
+                        .strong()
+                        .color(Theme::TEXT_PRIMARY),
                 );
             });
+
+            // Search bar
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.add_space(4.0);
+                let _ = self.search_bar.show(ui);
+            });
+
             ui.separator();
         });
 
         if let Some(doc) = &self.current_document {
-            let root = doc.root.clone();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
+            // Use reference instead of cloning the entire tree
+            let root = &doc.root;
+            let query = &self.search_bar.query;
+            let case_sensitive = self.search_bar.case_sensitive;
+
+            // Use both() for horizontal and vertical scrolling
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    self.xml_tree_view.show(ui, &root);
+                    self.xml_tree_view
+                        .show_with_search(ui, root, query, case_sensitive);
                 });
         } else {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
                 ui.label(
                     RichText::new("No file loaded")
-                        .color(Color32::GRAY)
+                        .color(Theme::TEXT_MUTED)
                         .italics(),
                 );
                 ui.add_space(10.0);
                 ui.label(
                     RichText::new("Open an XML or EXI file to view its structure")
                         .small()
-                        .color(Color32::DARK_GRAY),
+                        .color(Theme::TEXT_SECONDARY),
                 );
                 ui.add_space(20.0);
                 if ui.button("📂 Open XML File").clicked() {
                     self.open_file_dialog(FileDialogAction::OpenXml);
                 }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Ctrl+O: Open XML | Ctrl+E: Open EXI")
+                        .small()
+                        .color(Theme::TEXT_MUTED),
+                );
             });
         }
     }
@@ -419,15 +502,11 @@ impl MainPanel {
 
                 if let Some(info) = selected {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Element:")
-                                .strong()
-                                .color(Color32::from_rgb(180, 190, 254)),
-                        );
+                        ui.label(RichText::new("Element:").strong().color(Theme::ACCENT));
                         ui.label(
                             RichText::new(&info.name)
                                 .font(FontId::monospace(16.0))
-                                .color(Color32::from_rgb(166, 227, 161)),
+                                .color(Theme::ELEMENT_NAME),
                         );
                     });
 
@@ -436,11 +515,7 @@ impl MainPanel {
                     ui.add_space(10.0);
 
                     if !info.attributes.is_empty() {
-                        ui.label(
-                            RichText::new("Attributes")
-                                .strong()
-                                .color(Color32::from_rgb(137, 180, 250)),
-                        );
+                        ui.label(RichText::new("Attributes").strong().color(Theme::INFO));
                         ui.add_space(5.0);
 
                         egui::Grid::new("attr_grid")
@@ -451,12 +526,12 @@ impl MainPanel {
                                     ui.label(
                                         RichText::new(key)
                                             .font(FontId::monospace(12.0))
-                                            .color(Color32::from_rgb(249, 226, 175)),
+                                            .color(Theme::ATTRIBUTE_KEY),
                                     );
                                     ui.label(
                                         RichText::new(value)
                                             .font(FontId::monospace(12.0))
-                                            .color(Color32::from_rgb(205, 214, 244)),
+                                            .color(Theme::ATTRIBUTE_VALUE),
                                     );
                                     ui.end_row();
                                 }
@@ -470,21 +545,17 @@ impl MainPanel {
                     if let Some(text) = &info.text {
                         let t = text.trim();
                         if !t.is_empty() {
-                            ui.label(
-                                RichText::new("Text Content")
-                                    .strong()
-                                    .color(Color32::from_rgb(137, 180, 250)),
-                            );
+                            ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
                             ui.add_space(5.0);
                             Frame::new()
-                                .fill(Color32::from_rgb(30, 30, 46))
+                                .fill(Theme::CARD_BG)
                                 .inner_margin(8.0)
                                 .corner_radius(4.0)
                                 .show(ui, |ui| {
                                     ui.label(
                                         RichText::new(t)
                                             .font(FontId::monospace(12.0))
-                                            .color(Color32::from_rgb(205, 214, 244)),
+                                            .color(Theme::TEXT_CONTENT),
                                     );
                                 });
                             ui.add_space(10.0);
@@ -492,14 +563,11 @@ impl MainPanel {
                     }
 
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Children:")
-                                .strong()
-                                .color(Color32::from_rgb(137, 180, 250)),
-                        );
+                        ui.label(RichText::new("Children:").strong().color(Theme::INFO));
                         ui.label(
                             RichText::new(info.child_count.to_string())
-                                .font(FontId::monospace(14.0)),
+                                .font(FontId::monospace(14.0))
+                                .color(Theme::TEXT_PRIMARY),
                         );
                     });
                 } else {
@@ -507,14 +575,14 @@ impl MainPanel {
                         ui.add_space(80.0);
                         ui.label(
                             RichText::new("Select a node in the tree")
-                                .color(Color32::GRAY)
+                                .color(Theme::TEXT_MUTED)
                                 .italics(),
                         );
                         ui.add_space(10.0);
                         ui.label(
                             RichText::new("to view its details here")
                                 .small()
-                                .color(Color32::DARK_GRAY),
+                                .color(Theme::TEXT_SECONDARY),
                         );
                     });
                 }
@@ -538,21 +606,32 @@ impl MainPanel {
 
                 if let Some(xml) = &self.raw_xml_cache {
                     Frame::new()
-                        .fill(Color32::from_rgb(30, 30, 46))
+                        .fill(Theme::CARD_BG)
                         .inner_margin(10.0)
                         .corner_radius(4.0)
                         .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut xml.as_str())
-                                    .font(FontId::monospace(12.0))
-                                    .desired_rows(20)
-                                    .desired_width(f32::INFINITY),
-                            );
+                            // Use syntax highlighting for better readability
+                            let highlighted = self.syntax_highlighter.highlight_xml_custom(xml);
+                            
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                for (color, text) in highlighted {
+                                    ui.label(
+                                        RichText::new(text)
+                                            .color(color)
+                                            .font(FontId::monospace(12.0))
+                                    );
+                                }
+                            });
                         });
                 } else {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
-                        ui.label(RichText::new("No XML loaded").color(Color32::GRAY).italics());
+                        ui.label(
+                            RichText::new("No XML loaded")
+                                .color(Theme::TEXT_MUTED)
+                                .italics(),
+                        );
                     });
                 }
             });
@@ -571,16 +650,6 @@ impl MainPanel {
     }
 
     fn update_file_name(&mut self, path: &std::path::Path) {
-        self.status_data.file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(String::from);
+        self.status_data.file_name = path.file_name().and_then(|n| n.to_str()).map(String::from);
     }
-}
-
-fn compression_ratio(original: usize, compressed: usize) -> f64 {
-    if original == 0 {
-        return 0.0;
-    }
-    100.0 - (compressed as f64 / original as f64 * 100.0)
 }

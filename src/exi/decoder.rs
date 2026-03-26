@@ -2,7 +2,7 @@ use anyhow::Result;
 use erxi::decoder::decode;
 use erxi::xml_serializer::events_to_xml;
 
-use crate::xml::{parse_xml, XmlDocument};
+use crate::xml::{XmlDocument, parse_xml};
 
 /// Decode EXI binary data to an [`XmlDocument`].
 pub fn decode_exi_to_xml(exi_data: &[u8]) -> Result<XmlDocument> {

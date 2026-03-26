@@ -1,6 +1,8 @@
-use egui::{Color32, FontId, RichText, Ui};
+use egui::{FontId, RichText, Ui};
 
-use crate::xml::{truncate_str, XmlElement, XmlNode};
+use crate::xml::{XmlElement, XmlNode, truncate_str};
+
+use super::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // SelectedNodeInfo
@@ -19,28 +21,34 @@ pub struct SelectedNodeInfo {
 // XmlTreeView
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct XmlTreeView {
     selected_id: Option<u64>,
     selected_info: Option<SelectedNodeInfo>,
 }
 
-impl Default for XmlTreeView {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl XmlTreeView {
     pub fn new() -> Self {
-        Self {
-            selected_id: None,
-            selected_info: None,
-        }
+        Self::default()
     }
 
-    /// Render the tree starting from `root` into `ui`.
-    pub fn show(&mut self, ui: &mut Ui, root: &XmlNode) {
-        self.show_node(ui, root, 0);
+    /// Render the tree with search filtering.
+    pub fn show_with_search(
+        &mut self,
+        ui: &mut Ui,
+        root: &XmlNode,
+        query: &str,
+        case_sensitive: bool,
+    ) {
+        let search = if query.is_empty() {
+            None
+        } else {
+            Some(SearchContext {
+                query,
+                case_sensitive,
+            })
+        };
+        self.show_node(ui, root, 0, search.as_ref());
     }
 
     /// Return a reference to the currently selected node info, if any.
@@ -58,73 +66,142 @@ impl XmlTreeView {
     // Private
     // -----------------------------------------------------------------------
 
-    fn show_node(&mut self, ui: &mut Ui, node: &XmlNode, depth: usize) {
+    fn show_node(
+        &mut self,
+        ui: &mut Ui,
+        node: &XmlNode,
+        depth: usize,
+        search: Option<&SearchContext>,
+    ) {
         match node {
-            XmlNode::Element(elem) => self.show_element(ui, elem, depth),
+            XmlNode::Element(elem) => self.show_element(ui, elem, depth, search),
 
             XmlNode::Text(text) => {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
+                    // Skip if search is active and doesn't match
+                    if let Some(s) = search
+                        && !s.matches(trimmed)
+                    {
+                        return;
+                    }
                     ui.horizontal(|ui| {
                         ui.add_space(indent_px(depth));
                         ui.label(
                             RichText::new(format!("\"{}\"", truncate_str(trimmed, 60)))
                                 .font(FontId::monospace(11.0))
-                                .color(Color32::from_rgb(150, 150, 150)),
+                                .color(Theme::TEXT_MUTED),
                         );
                     });
                 }
             }
 
             XmlNode::Comment(comment) => {
+                // Skip if search is active and doesn't match
+                if let Some(s) = search
+                    && !s.matches(comment)
+                {
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(indent_px(depth));
                     ui.label(
                         RichText::new(format!("<!-- {} -->", truncate_str(comment, 50)))
                             .font(FontId::monospace(11.0))
-                            .color(Color32::from_rgb(108, 135, 108)),
+                            .color(Theme::COMMENT),
                     );
                 });
             }
         }
     }
 
-    fn show_element(&mut self, ui: &mut Ui, elem: &XmlElement, depth: usize) {
+    fn show_element(
+        &mut self,
+        ui: &mut Ui,
+        elem: &XmlElement,
+        depth: usize,
+        search: Option<&SearchContext>,
+    ) {
         let id = elem.id.0;
         let is_selected = self.selected_id == Some(id);
-        let label = Self::format_label(elem);
+
+        // Check if this element or any descendant matches search
+        let matches_search = search.is_none_or(|s| self.element_matches(elem, s));
+        if !matches_search {
+            return;
+        }
+
+        // Highlight if matches search
+        let highlight = search.is_some_and(|s| s.matches(&elem.name));
+
+        let label = Self::format_label(elem, highlight);
 
         if elem.has_children() {
             // Collapsible header for elements with children.
-            let header = egui::CollapsingHeader::new(&label)
-                .default_open(depth < 3)
-                .show(ui, |ui| {
-                    for child in &elem.children {
-                        self.show_node(ui, child, depth + 1);
-                    }
-                });
+            let header = egui::CollapsingHeader::new(&label).default_open(depth < 2 || highlight);
 
-            if header.header_response.clicked() {
+            let response = header.show(ui, |ui| {
+                for child in &elem.children {
+                    self.show_node(ui, child, depth + 1, search);
+                }
+            });
+
+            if response.header_response.clicked() {
                 self.select_element(elem);
             }
 
             // Highlight the header when selected.
             if is_selected {
-                ui.painter().rect_filled(
-                    header.header_response.rect,
-                    2.0,
-                    Color32::from_rgba_premultiplied(100, 120, 200, 40),
-                );
+                ui.painter()
+                    .rect_filled(response.header_response.rect, 4.0, Theme::SELECTION);
             }
         } else {
             // Leaf element — plain selectable row.
             ui.horizontal(|ui| {
                 ui.add_space(indent_px(depth) + 20.0);
-                if ui.selectable_label(is_selected, &label).clicked() {
+                let res = ui.selectable_label(is_selected, &label);
+                if res.clicked() {
                     self.select_element(elem);
                 }
             });
         }
+    }
+
+    /// Check if element or any descendant matches search.
+    fn element_matches(&self, elem: &XmlElement, search: &SearchContext) -> bool {
+        // Check element name
+        if search.matches(&elem.name) {
+            return true;
+        }
+
+        // Check attributes
+        for attr in &elem.attributes {
+            if search.matches(&attr.name) || search.matches(&attr.value) {
+                return true;
+            }
+        }
+
+        // Check text content
+        if let Some(text) = &elem.text
+            && search.matches(text)
+        {
+            return true;
+        }
+
+        // Recursively check children
+        for child in &elem.children {
+            if let XmlNode::Element(child_elem) = child {
+                if self.element_matches(child_elem, search) {
+                    return true;
+                }
+            } else if let XmlNode::Text(t) = child
+                && search.matches(t)
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn select_element(&mut self, elem: &XmlElement) {
@@ -142,8 +219,15 @@ impl XmlTreeView {
     }
 
     /// Build a concise label string for an element node.
-    fn format_label(elem: &XmlElement) -> String {
-        let mut label = format!("<{}", elem.name);
+    fn format_label(elem: &XmlElement, highlight: bool) -> String {
+        let mut label = String::new();
+
+        // Element name with optional highlight marker
+        if highlight {
+            label.push_str("🔍 ");
+        }
+        label.push('<');
+        label.push_str(&elem.name);
 
         if !elem.attributes.is_empty() {
             label.push(' ');
@@ -162,6 +246,25 @@ impl XmlTreeView {
         }
 
         label
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search context
+// ---------------------------------------------------------------------------
+
+struct SearchContext<'a> {
+    query: &'a str,
+    case_sensitive: bool,
+}
+
+impl SearchContext<'_> {
+    fn matches(&self, text: &str) -> bool {
+        if self.case_sensitive {
+            text.contains(self.query)
+        } else {
+            text.to_lowercase().contains(&self.query.to_lowercase())
+        }
     }
 }
 

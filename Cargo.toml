@@ -1,8 +1,16 @@
 [package]
 name = "xml_tool"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
+authors = ["XML Tool Contributors"]
+description = "A modern, high-performance XML/EXI viewer and editor"
+readme = "README.md"
+homepage = "https://gitlab.com/your-namespace/xml_tool"
+repository = "https://gitlab.com/your-namespace/xml_tool"
+license = "MIT"
+keywords = ["xml", "exi", "viewer", "editor", "gui"]
+categories = ["gui", "parsing", "visualization"]
 
 [dependencies]
 # XML parsing
@@ -22,6 +30,19 @@ rfd = "0.15"
 # Theme
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 
+# Performance optimization
+parking_lot = "0.12"
+lru = "0.12"
+
+# Syntax highlighting
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+
+# Icons
+egui-phosphor = { version = "0.7", optional = true }
+
+# Export formats
+serde_json = "1.0"
+
 # Utilities
 thiserror = "2.0"
 anyhow = "1.0"
@@ -29,6 +50,14 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.13"
+
 [profile.release]
 opt-level = 3
 lto = true
+
+[[bench]]
+name = "xml_benchmark"
+harness = false

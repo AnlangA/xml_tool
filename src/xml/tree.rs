@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -142,12 +143,24 @@ impl XmlNode {
 
 #[derive(Debug, Clone)]
 pub struct XmlDocument {
-    pub root: XmlNode,
+    pub root: Arc<XmlNode>,
+    version: u64,  // Document version for cache invalidation
 }
 
 impl XmlDocument {
     pub fn new(root: XmlNode) -> Self {
-        Self { root }
+        Self { 
+            root: Arc::new(root),
+            version: 0,
+        }
+    }
+    
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+    
+    pub fn increment_version(&mut self) {
+        self.version += 1;
     }
 }
 

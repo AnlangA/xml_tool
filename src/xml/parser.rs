@@ -114,10 +114,7 @@ fn attach_node(node: XmlNode, stack: &mut [XmlElement], root: &mut Option<XmlNod
 }
 
 /// Extract attributes from a quick-xml `BytesStart` event into `element`.
-fn collect_attributes<'a>(
-    e: &quick_xml::events::BytesStart<'a>,
-    element: &mut XmlElement,
-) {
+fn collect_attributes<'a>(e: &quick_xml::events::BytesStart<'a>, element: &mut XmlElement) {
     for attr_result in e.attributes() {
         match attr_result {
             Ok(attr) => {

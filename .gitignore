@@ -1,1 +1,33 @@
+# Rust
 /target
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test outputs
+/test-output/
+
+# Benchmark results
+/target/criterion/
