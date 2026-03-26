@@ -29,7 +29,7 @@ catppuccin-egui = { version = "5.7.0", default-features = false, features = ["eg
 
 # Performance optimization
 parking_lot = "0.12"
-lru = "0.12"
+lru = "0.16"
 
 # Icons
 egui-phosphor = { version = "0.7", optional = true }
