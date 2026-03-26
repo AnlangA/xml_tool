@@ -7,6 +7,7 @@ pub enum FileDialogResult {
     OpenExi(Option<PathBuf>),
     SaveXml(Option<PathBuf>),
     SaveExi(Option<PathBuf>),
+    SaveJson(Option<PathBuf>),
 }
 
 /// Which file-dialog action to open.
@@ -16,6 +17,7 @@ pub enum FileDialogAction {
     OpenExi,
     SaveXml,
     SaveExi,
+    SaveJson,
 }
 
 /// Manages async file dialogs.
@@ -81,6 +83,12 @@ impl FileDialogManager {
                     rfd::FileDialog::new()
                         .add_filter("EXI Files", &["exi"])
                         .set_file_name("output.exi")
+                        .save_file(),
+                ),
+                FileDialogAction::SaveJson => FileDialogResult::SaveJson(
+                    rfd::FileDialog::new()
+                        .add_filter("JSON Files", &["json"])
+                        .set_file_name("output.json")
                         .save_file(),
                 ),
             };

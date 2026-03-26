@@ -1,13 +1,5 @@
 use eframe::egui;
-
-mod app;
-mod exi;
-mod export;
-mod ui;
-mod utils;
-mod xml;
-
-use app::XmlToolApp;
+use xml_tool::XmlToolApp;
 
 fn main() -> eframe::Result<()> {
     // Log to stderr for debugging

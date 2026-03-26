@@ -11,6 +11,7 @@ use super::theme::Theme;
 /// Snapshot of a selected element's data for display in the details panel.
 #[derive(Debug, Clone)]
 pub struct SelectedNodeInfo {
+    pub id: u64,
     pub name: String,
     pub attributes: Vec<(String, String)>,
     pub text: Option<String>,
@@ -46,6 +47,7 @@ impl XmlTreeView {
             Some(SearchContext {
                 query,
                 case_sensitive,
+                folded_query: (!case_sensitive).then(|| query.to_lowercase()),
             })
         };
         self.show_node(ui, root, 0, search.as_ref());
@@ -54,6 +56,27 @@ impl XmlTreeView {
     /// Return a reference to the currently selected node info, if any.
     pub fn get_selected_info(&self) -> Option<&SelectedNodeInfo> {
         self.selected_info.as_ref()
+    }
+
+    pub fn selected_id(&self) -> Option<u64> {
+        self.selected_id
+    }
+
+    pub fn select_id(&mut self, root: &XmlNode, id: u64) {
+        self.selected_id = Some(id);
+        self.sync_selected_info(root);
+    }
+
+    pub fn sync_selected_info(&mut self, root: &XmlNode) {
+        let Some(selected_id) = self.selected_id else {
+            self.selected_info = None;
+            return;
+        };
+
+        self.selected_info = Self::find_element(root, selected_id).map(Self::build_selected_info);
+        if self.selected_info.is_none() {
+            self.selected_id = None;
+        }
     }
 
     /// Clear the current selection.
@@ -138,7 +161,9 @@ impl XmlTreeView {
 
         if elem.has_children() {
             // Collapsible header for elements with children.
-            let header = egui::CollapsingHeader::new(&label).default_open(depth < 2 || highlight);
+            let header = egui::CollapsingHeader::new(&label)
+                .id_salt(id)
+                .default_open(depth < 2 || highlight);
 
             let response = header.show(ui, |ui| {
                 for child in &elem.children {
@@ -206,16 +231,7 @@ impl XmlTreeView {
 
     fn select_element(&mut self, elem: &XmlElement) {
         self.selected_id = Some(elem.id.0);
-        self.selected_info = Some(SelectedNodeInfo {
-            name: elem.name.clone(),
-            attributes: elem
-                .attributes
-                .iter()
-                .map(|a| (a.name.clone(), a.value.clone()))
-                .collect(),
-            text: elem.text.clone(),
-            child_count: elem.children.len(),
-        });
+        self.selected_info = Some(Self::build_selected_info(elem));
     }
 
     /// Build a concise label string for an element node.
@@ -247,6 +263,35 @@ impl XmlTreeView {
 
         label
     }
+
+    fn build_selected_info(elem: &XmlElement) -> SelectedNodeInfo {
+        SelectedNodeInfo {
+            id: elem.id.0,
+            name: elem.name.clone(),
+            attributes: elem
+                .attributes
+                .iter()
+                .map(|a| (a.name.clone(), a.value.clone()))
+                .collect(),
+            text: elem.text.clone(),
+            child_count: elem.children.len(),
+        }
+    }
+
+    fn find_element(node: &XmlNode, id: u64) -> Option<&XmlElement> {
+        let element = node.as_element()?;
+        if element.id.0 == id {
+            return Some(element);
+        }
+
+        for child in &element.children {
+            if let Some(found) = Self::find_element(child, id) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +301,7 @@ impl XmlTreeView {
 struct SearchContext<'a> {
     query: &'a str,
     case_sensitive: bool,
+    folded_query: Option<String>,
 }
 
 impl SearchContext<'_> {
@@ -263,7 +309,9 @@ impl SearchContext<'_> {
         if self.case_sensitive {
             text.contains(self.query)
         } else {
-            text.to_lowercase().contains(&self.query.to_lowercase())
+            self.folded_query
+                .as_deref()
+                .is_some_and(|query| text.to_lowercase().contains(query))
         }
     }
 }

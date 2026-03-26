@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use egui::text::LayoutJob;
 use egui::{Context, FontId, Frame, Key, Margin, Modifiers, RichText};
 
 use crate::exi::{decode_exi_to_xml, encode_xml_to_exi};
@@ -13,7 +14,7 @@ use super::shortcuts_panel::ShortcutsPanel;
 use super::status_bar::{StatusBarData, show_status_bar};
 use super::syntax_highlighter::SyntaxHighlighter;
 use super::theme::Theme;
-use super::xml_tree::XmlTreeView;
+use super::xml_tree::{SelectedNodeInfo, XmlTreeView};
 
 /// Whether the current document originated from XML or EXI.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,20 +33,88 @@ pub struct MainPanel {
     current_file_path: Option<PathBuf>,
     current_file_type: FileType,
     exi_data: Option<Vec<u8>>,
+    pending_json_export: Option<String>,
 
     // UI state
     xml_tree_view: XmlTreeView,
     search_bar: SearchBar,
     shortcuts_panel: ShortcutsPanel,
     raw_xml_cache: Option<String>,
+    raw_xml_highlight_cache: Option<Vec<LayoutJob>>,
     show_raw_xml: bool,
     syntax_highlighter: SyntaxHighlighter,
+    detail_editor: DetailEditorState,
 
     // Status bar
     status_data: StatusBarData,
 
     // Async file dialog
     file_dialog: FileDialogManager,
+}
+
+#[derive(Default)]
+struct DetailEditorState {
+    selected_id: Option<u64>,
+    element_name: String,
+    attribute_values: Vec<String>,
+    text_content: String,
+    new_attribute_name: String,
+    new_attribute_value: String,
+    new_child_name: String,
+}
+
+impl DetailEditorState {
+    fn sync_with_selection(&mut self, selected: Option<&SelectedNodeInfo>) {
+        match selected {
+            Some(info)
+                if self.selected_id != Some(info.id)
+                    || self.attribute_values.len() != info.attributes.len() =>
+            {
+                self.load_from_info(info);
+            }
+            Some(_) => {}
+            None => self.clear(),
+        }
+    }
+
+    fn load_from_info(&mut self, info: &SelectedNodeInfo) {
+        self.selected_id = Some(info.id);
+        self.element_name = info.name.clone();
+        self.attribute_values = info
+            .attributes
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect();
+        self.text_content = info.text.clone().unwrap_or_default();
+        self.new_attribute_name.clear();
+        self.new_attribute_value.clear();
+        self.new_child_name.clear();
+    }
+
+    fn has_changes(&self, info: &SelectedNodeInfo) -> bool {
+        if self.element_name != info.name {
+            return true;
+        }
+
+        if self.attribute_values.len() != info.attributes.len() {
+            return true;
+        }
+
+        if info
+            .attributes
+            .iter()
+            .zip(&self.attribute_values)
+            .any(|((_, current), draft)| current != draft)
+        {
+            return true;
+        }
+
+        info.child_count == 0 && self.text_content != info.text.clone().unwrap_or_default()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl Default for MainPanel {
@@ -64,13 +133,16 @@ impl MainPanel {
             current_file_path: None,
             current_file_type: FileType::Xml,
             exi_data: None,
+            pending_json_export: None,
 
             xml_tree_view: XmlTreeView::new(),
             search_bar: SearchBar::new(),
             shortcuts_panel: ShortcutsPanel::new(),
             raw_xml_cache: None,
+            raw_xml_highlight_cache: None,
             show_raw_xml: false,
             syntax_highlighter: SyntaxHighlighter::new(),
+            detail_editor: DetailEditorState::default(),
 
             status_data,
 
@@ -84,7 +156,7 @@ impl MainPanel {
         self.show_menu_bar(ctx);
         show_status_bar(ctx, &self.status_data);
         self.show_body(ctx);
-        
+
         // Show shortcuts panel if visible
         self.shortcuts_panel.show(ctx);
 
@@ -137,6 +209,11 @@ impl MainPanel {
                 FileDialogResult::OpenExi(Some(p)) => self.load_exi(&p),
                 FileDialogResult::SaveXml(Some(p)) => self.save_xml(&p),
                 FileDialogResult::SaveExi(Some(p)) => self.save_exi(&p),
+                FileDialogResult::SaveJson(Some(p)) => self.save_json(&p),
+                FileDialogResult::SaveJson(None) => {
+                    self.pending_json_export = None;
+                    self.set_status("JSON export cancelled.");
+                }
                 _ => {}
             }
         }
@@ -158,10 +235,12 @@ impl MainPanel {
                     .unwrap_or(0);
                 self.status_data.compressed_size = 0;
                 self.exi_data = None;
+                self.pending_json_export = None;
                 self.current_document = Some(doc);
                 self.current_file_path = Some(path.clone());
                 self.current_file_type = FileType::Xml;
                 self.xml_tree_view.clear_selection();
+                self.detail_editor.clear();
                 self.invalidate_raw_xml_cache();
                 self.update_file_name(path);
                 self.set_status(format!("Opened: {}", path.display()));
@@ -177,10 +256,12 @@ impl MainPanel {
                     self.status_data.original_size = data.len();
                     self.status_data.compressed_size = 0;
                     self.exi_data = Some(data);
+                    self.pending_json_export = None;
                     self.current_document = Some(doc);
                     self.current_file_path = Some(path.clone());
                     self.current_file_type = FileType::Exi;
                     self.xml_tree_view.clear_selection();
+                    self.detail_editor.clear();
                     self.invalidate_raw_xml_cache();
                     self.update_file_name(path);
                     self.set_status(format!("Opened EXI: {}", path.display()));
@@ -227,6 +308,8 @@ impl MainPanel {
             Ok(doc) => {
                 self.current_document = Some(doc);
                 self.xml_tree_view.clear_selection();
+                self.detail_editor.clear();
+                self.pending_json_export = None;
                 self.invalidate_raw_xml_cache();
                 self.set_status("Decompressed from EXI.");
             }
@@ -256,26 +339,35 @@ impl MainPanel {
             Err(e) => self.set_status(format!("Write error: {e}")),
         }
     }
-    
+
+    fn save_json(&mut self, path: &PathBuf) {
+        let Some(json_str) = self.pending_json_export.take() else {
+            self.set_status("No JSON export pending.");
+            return;
+        };
+
+        match std::fs::write(path, json_str) {
+            Ok(_) => self.set_status(format!("Exported to JSON: {}", path.display())),
+            Err(e) => self.set_status(format!("Write error: {e}")),
+        }
+    }
+
     fn export_to_json(&mut self) {
+        if self.file_dialog.is_pending() {
+            self.set_status("Another file dialog is already open.");
+            return;
+        }
+
         let Some(doc) = &self.current_document else {
             self.set_status("No document loaded.");
             return;
         };
-        
+
         match export_to_json(doc) {
             Ok(json_str) => {
-                // Open save dialog for JSON
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON Files", &["json"])
-                    .set_file_name("output.json")
-                    .save_file()
-                {
-                    match std::fs::write(&path, json_str) {
-                        Ok(_) => self.set_status(format!("Exported to JSON: {}", path.display())),
-                        Err(e) => self.set_status(format!("Write error: {e}")),
-                    }
-                }
+                self.pending_json_export = Some(json_str);
+                self.open_file_dialog(FileDialogAction::SaveJson);
+                self.set_status("Choose where to save the JSON export.");
             }
             Err(e) => self.set_status(format!("JSON export error: {e}")),
         }
@@ -494,6 +586,7 @@ impl MainPanel {
 
     fn show_details_tab(&mut self, ui: &mut egui::Ui) {
         let selected = self.xml_tree_view.get_selected_info().cloned();
+        self.detail_editor.sync_with_selection(selected.as_ref());
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -501,65 +594,172 @@ impl MainPanel {
                 ui.add_space(10.0);
 
                 if let Some(info) = selected {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Element:").strong().color(Theme::ACCENT));
-                        ui.label(
-                            RichText::new(&info.name)
-                                .font(FontId::monospace(16.0))
-                                .color(Theme::ELEMENT_NAME),
-                        );
-                    });
+                    let is_root_selected = self
+                        .current_document
+                        .as_ref()
+                        .and_then(|doc| doc.root.as_element().map(|root| root.id.0))
+                        == Some(info.id);
+
+                    ui.label(RichText::new("Element Name").strong().color(Theme::ACCENT));
+                    ui.add_space(5.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.detail_editor.element_name)
+                            .desired_width(f32::INFINITY),
+                    );
 
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(10.0);
 
                     if !info.attributes.is_empty() {
-                        ui.label(RichText::new("Attributes").strong().color(Theme::INFO));
+                        ui.label(
+                            RichText::new("Attribute Values")
+                                .strong()
+                                .color(Theme::INFO),
+                        );
                         ui.add_space(5.0);
 
                         egui::Grid::new("attr_grid")
-                            .num_columns(2)
+                            .num_columns(3)
                             .spacing([10.0, 4.0])
                             .show(ui, |ui| {
-                                for (key, value) in &info.attributes {
+                                let mut attribute_to_remove: Option<String> = None;
+                                for ((key, _), value) in info
+                                    .attributes
+                                    .iter()
+                                    .zip(self.detail_editor.attribute_values.iter_mut())
+                                {
                                     ui.label(
                                         RichText::new(key)
                                             .font(FontId::monospace(12.0))
                                             .color(Theme::ATTRIBUTE_KEY),
                                     );
-                                    ui.label(
-                                        RichText::new(value)
-                                            .font(FontId::monospace(12.0))
-                                            .color(Theme::ATTRIBUTE_VALUE),
+                                    ui.add(
+                                        egui::TextEdit::singleline(value)
+                                            .desired_width(f32::INFINITY),
                                     );
+                                    if ui.small_button("Remove").clicked() {
+                                        attribute_to_remove = Some(key.clone());
+                                    }
                                     ui.end_row();
+                                }
+
+                                if let Some(attribute_name) = attribute_to_remove {
+                                    self.remove_selected_attribute(&attribute_name);
                                 }
                             });
 
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.detail_editor.new_attribute_name)
+                                    .hint_text("attribute name")
+                                    .desired_width(160.0),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.detail_editor.new_attribute_value)
+                                    .hint_text("attribute value")
+                                    .desired_width(180.0),
+                            );
+                            let can_add_attribute =
+                                !self.detail_editor.new_attribute_name.trim().is_empty();
+                            if ui
+                                .add_enabled(can_add_attribute, egui::Button::new("Add Attribute"))
+                                .clicked()
+                            {
+                                self.add_attribute_to_selected();
+                            }
+                        });
+
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                    } else {
+                        ui.label(RichText::new("Attributes").strong().color(Theme::INFO));
+                        ui.add_space(5.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.detail_editor.new_attribute_name)
+                                    .hint_text("attribute name")
+                                    .desired_width(160.0),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.detail_editor.new_attribute_value)
+                                    .hint_text("attribute value")
+                                    .desired_width(180.0),
+                            );
+                            let can_add_attribute =
+                                !self.detail_editor.new_attribute_name.trim().is_empty();
+                            if ui
+                                .add_enabled(can_add_attribute, egui::Button::new("Add Attribute"))
+                                .clicked()
+                            {
+                                self.add_attribute_to_selected();
+                            }
+                        });
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(10.0);
                     }
 
-                    if let Some(text) = &info.text {
-                        let t = text.trim();
-                        if !t.is_empty() {
-                            ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
-                            ui.add_space(5.0);
-                            Frame::new()
-                                .fill(Theme::CARD_BG)
-                                .inner_margin(8.0)
-                                .corner_radius(4.0)
-                                .show(ui, |ui| {
+                    ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
+                    ui.add_space(5.0);
+                    if info.child_count == 0 {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.detail_editor.text_content)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(5),
+                        );
+                    } else {
+                        let preview = info.text.as_deref().unwrap_or("");
+                        Frame::new()
+                            .fill(Theme::CARD_BG)
+                            .inner_margin(8.0)
+                            .corner_radius(4.0)
+                            .show(ui, |ui| {
+                                if preview.is_empty() {
                                     ui.label(
-                                        RichText::new(t)
+                                        RichText::new(
+                                            "Text editing for nodes with children will land in a later phase.",
+                                        )
+                                        .small()
+                                        .color(Theme::TEXT_MUTED),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new(preview)
                                             .font(FontId::monospace(12.0))
                                             .color(Theme::TEXT_CONTENT),
                                     );
-                                });
-                            ui.add_space(10.0);
+                                }
+                            });
+                    }
+                    ui.add_space(10.0);
+
+                    let has_changes = self.detail_editor.has_changes(&info);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(has_changes, egui::Button::new("Apply Changes"))
+                            .clicked()
+                        {
+                            self.apply_selected_element_edits();
                         }
+
+                        if ui
+                            .add_enabled(has_changes, egui::Button::new("Reset"))
+                            .clicked()
+                        {
+                            self.detail_editor.load_from_info(&info);
+                        }
+                    });
+
+                    if !has_changes {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("No unapplied changes")
+                                .small()
+                                .color(Theme::TEXT_MUTED),
+                        );
                     }
 
                     ui.horizontal(|ui| {
@@ -570,6 +770,34 @@ impl MainPanel {
                                 .color(Theme::TEXT_PRIMARY),
                         );
                     });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.detail_editor.new_child_name)
+                                .hint_text("new child element name")
+                                .desired_width(220.0),
+                        );
+                        let can_add_child = !self.detail_editor.new_child_name.trim().is_empty();
+                        if ui
+                            .add_enabled(can_add_child, egui::Button::new("Add Child Element"))
+                            .clicked()
+                        {
+                            self.add_child_to_selected();
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.add_enabled_ui(!is_root_selected, |ui| {
+                        if ui.button("Delete Selected Element").clicked() {
+                            self.remove_selected_element();
+                        }
+                    });
+                    if is_root_selected {
+                        ui.label(
+                            RichText::new("The document root cannot be deleted.")
+                                .small()
+                                .color(Theme::TEXT_MUTED),
+                        );
+                    }
                 } else {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
@@ -599,30 +827,65 @@ impl MainPanel {
             });
         }
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
+        if self.raw_xml_highlight_cache.is_none()
+            && let Some(xml) = &self.raw_xml_cache
+        {
+            self.raw_xml_highlight_cache = Some(self.syntax_highlighter.highlight_xml_lines(xml));
+        }
+
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(10.0);
 
-                if let Some(xml) = &self.raw_xml_cache {
+                if let (Some(xml), Some(line_jobs)) =
+                    (&self.raw_xml_cache, &self.raw_xml_highlight_cache)
+                {
+                    let line_number_width = line_jobs.len().max(1).to_string().len();
                     Frame::new()
                         .fill(Theme::CARD_BG)
                         .inner_margin(10.0)
                         .corner_radius(4.0)
                         .show(ui, |ui| {
-                            // Use syntax highlighting for better readability
-                            let highlighted = self.syntax_highlighter.highlight_xml_custom(xml);
-                            
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                for (color, text) in highlighted {
-                                    ui.label(
-                                        RichText::new(text)
-                                            .color(color)
-                                            .font(FontId::monospace(12.0))
-                                    );
-                                }
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{} lines", line_jobs.len()))
+                                        .small()
+                                        .color(Theme::INFO),
+                                );
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(format!("{} bytes", xml.len()))
+                                        .small()
+                                        .color(Theme::TEXT_MUTED),
+                                );
                             });
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            for (index, job) in line_jobs.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [20.0 + line_number_width as f32 * 8.0, 0.0],
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{:>width$}",
+                                                index + 1,
+                                                width = line_number_width
+                                            ))
+                                            .font(FontId::monospace(12.0))
+                                            .color(Theme::TEXT_MUTED),
+                                        ),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(job.clone())
+                                            .selectable(true)
+                                            .extend()
+                                            .show_tooltip_when_elided(false),
+                                    );
+                                });
+                            }
                         });
                 } else {
                     ui.vertical_centered(|ui| {
@@ -645,8 +908,250 @@ impl MainPanel {
         self.status_data.set_message(msg);
     }
 
+    fn apply_selected_element_edits(&mut self) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+        let Some(selected) = self.xml_tree_view.get_selected_info().cloned() else {
+            self.set_status("No element details available.");
+            return;
+        };
+
+        let draft_name = self.detail_editor.element_name.clone();
+        let draft_attribute_values = self.detail_editor.attribute_values.clone();
+        let draft_text = self.detail_editor.text_content.clone();
+
+        let mut name_changed = false;
+        let mut attributes_changed = false;
+        let mut text_changed = false;
+
+        let update_result = (|| {
+            let Some(doc) = self.current_document.as_mut() else {
+                return Ok(());
+            };
+
+            name_changed = doc.rename_element(selected_id, draft_name)?;
+
+            for ((attribute_name, current_value), draft_value) in
+                selected.attributes.iter().zip(&draft_attribute_values)
+            {
+                if current_value != draft_value
+                    && doc.set_attribute_value(selected_id, attribute_name, draft_value.clone())
+                {
+                    attributes_changed = true;
+                }
+            }
+
+            if selected.child_count == 0 && selected.text.clone().unwrap_or_default() != draft_text
+            {
+                text_changed = doc.set_text_content(
+                    selected_id,
+                    Some(draft_text.clone()).filter(|text| !text.is_empty()),
+                )?;
+            }
+
+            Ok::<(), anyhow::Error>(())
+        })();
+
+        if let Err(err) = update_result {
+            self.set_status(format!("Edit rejected: {err}"));
+            return;
+        }
+
+        if !name_changed && !attributes_changed && !text_changed {
+            self.set_status("No element changes to apply.");
+            return;
+        }
+
+        let cleared_exi = self.invalidate_after_document_edit();
+        self.sync_selection_from_document();
+
+        let mut changes = Vec::new();
+        if name_changed {
+            changes.push("name");
+        }
+        if attributes_changed {
+            changes.push("attributes");
+        }
+        if text_changed {
+            changes.push("text");
+        }
+
+        let message = format!("Updated selected element ({})", changes.join(", "));
+        self.set_status(self.with_exi_notice(message, cleared_exi));
+    }
+
+    fn add_attribute_to_selected(&mut self) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let attribute_name = self.detail_editor.new_attribute_name.trim().to_string();
+        let attribute_value = self.detail_editor.new_attribute_value.clone();
+
+        let add_result = match self.current_document.as_mut() {
+            Some(doc) => doc.add_attribute(selected_id, attribute_name.clone(), attribute_value),
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        match add_result {
+            Ok(true) => {
+                self.detail_editor.new_attribute_name.clear();
+                self.detail_editor.new_attribute_value.clear();
+                let cleared_exi = self.invalidate_after_document_edit();
+                self.sync_selection_from_document();
+                self.set_status(
+                    self.with_exi_notice(
+                        format!("Added attribute '{attribute_name}'"),
+                        cleared_exi,
+                    ),
+                );
+            }
+            Ok(false) => self.set_status("Attribute was not added."),
+            Err(err) => self.set_status(format!("Cannot add attribute: {err}")),
+        }
+    }
+
+    fn remove_selected_attribute(&mut self, attribute_name: &str) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let removed = match self.current_document.as_mut() {
+            Some(doc) => doc.remove_attribute(selected_id, attribute_name),
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        if !removed {
+            self.set_status(format!("Attribute '{attribute_name}' was not removed."));
+            return;
+        }
+
+        let cleared_exi = self.invalidate_after_document_edit();
+        self.sync_selection_from_document();
+        self.set_status(
+            self.with_exi_notice(format!("Removed attribute '{attribute_name}'"), cleared_exi),
+        );
+    }
+
+    fn add_child_to_selected(&mut self) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let child_name = self.detail_editor.new_child_name.trim().to_string();
+        let add_result = match self.current_document.as_mut() {
+            Some(doc) => doc.append_child_element(selected_id, child_name.clone()),
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        match add_result {
+            Ok(Some(child_id)) => {
+                self.detail_editor.new_child_name.clear();
+                let cleared_exi = self.invalidate_after_document_edit();
+                self.select_document_node(Some(child_id));
+                self.set_status(
+                    self.with_exi_notice(
+                        format!("Added child element '{child_name}'"),
+                        cleared_exi,
+                    ),
+                );
+            }
+            Ok(None) => self.set_status("Selected element is no longer available."),
+            Err(err) => self.set_status(format!("Cannot add child element: {err}")),
+        }
+    }
+
+    fn remove_selected_element(&mut self) {
+        let Some(selected_id) = self.xml_tree_view.selected_id() else {
+            self.set_status("No element selected.");
+            return;
+        };
+
+        let remove_result = match self.current_document.as_mut() {
+            Some(doc) => doc.remove_element(selected_id),
+            None => {
+                self.set_status("No document loaded.");
+                return;
+            }
+        };
+
+        match remove_result {
+            Ok(Some(parent_id)) => {
+                let cleared_exi = self.invalidate_after_document_edit();
+                self.select_document_node(Some(parent_id));
+                self.set_status(
+                    self.with_exi_notice("Removed selected element.".to_string(), cleared_exi),
+                );
+            }
+            Ok(None) => self.set_status("Selected element was not removed."),
+            Err(err) => self.set_status(format!("Cannot remove selected element: {err}")),
+        }
+    }
+
     fn invalidate_raw_xml_cache(&mut self) {
         self.raw_xml_cache = None;
+        self.raw_xml_highlight_cache = None;
+    }
+
+    fn invalidate_after_document_edit(&mut self) -> bool {
+        let cleared_exi = self.exi_data.take().is_some();
+        self.pending_json_export = None;
+        self.status_data.compressed_size = 0;
+        self.invalidate_raw_xml_cache();
+        cleared_exi
+    }
+
+    fn sync_selection_from_document(&mut self) {
+        if let Some(doc) = &self.current_document {
+            self.xml_tree_view.sync_selected_info(doc.root.as_ref());
+            if let Some(updated) = self.xml_tree_view.get_selected_info().cloned() {
+                self.detail_editor.load_from_info(&updated);
+            } else {
+                self.detail_editor.clear();
+            }
+        } else {
+            self.xml_tree_view.clear_selection();
+            self.detail_editor.clear();
+        }
+    }
+
+    fn select_document_node(&mut self, id: Option<u64>) {
+        match (&self.current_document, id) {
+            (Some(doc), Some(id)) => {
+                self.xml_tree_view.select_id(doc.root.as_ref(), id);
+                if let Some(updated) = self.xml_tree_view.get_selected_info().cloned() {
+                    self.detail_editor.load_from_info(&updated);
+                } else {
+                    self.detail_editor.clear();
+                }
+            }
+            _ => {
+                self.xml_tree_view.clear_selection();
+                self.detail_editor.clear();
+            }
+        }
+    }
+
+    fn with_exi_notice(&self, message: String, cleared_exi: bool) -> String {
+        if cleared_exi {
+            format!("{message} — EXI cache cleared, recompress to save EXI again.")
+        } else {
+            message
+        }
     }
 
     fn update_file_name(&mut self, path: &std::path::Path) {
