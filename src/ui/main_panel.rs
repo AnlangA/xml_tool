@@ -8,6 +8,7 @@ use crate::export::export_to_json;
 use crate::utils::compression_ratio;
 use crate::xml::{XmlDocument, parse_xml_file, serialize_xml};
 
+use super::base64_image::EncodedImagePreview;
 use super::file_dialog::{FileDialogAction, FileDialogManager, FileDialogResult};
 use super::search_bar::SearchBar;
 use super::shortcuts_panel::ShortcutsPanel;
@@ -106,6 +107,7 @@ pub struct MainPanel {
     show_raw_xml: bool,
     syntax_highlighter: SyntaxHighlighter,
     detail_editor: DetailEditorState,
+    encoded_image_preview: EncodedImagePreview,
     history: DocumentHistory,
     pending_delete_confirmation: Option<u64>,
     pending_unsaved_action: Option<PendingUnsavedAction>,
@@ -128,6 +130,7 @@ struct DetailEditorState {
     new_attribute_value: String,
     new_child_name: String,
     new_sibling_name: String,
+    text_revision: u64,
 }
 
 impl DetailEditorState {
@@ -145,6 +148,7 @@ impl DetailEditorState {
     }
 
     fn load_from_info(&mut self, info: &SelectedNodeInfo) {
+        self.text_revision = self.text_revision.wrapping_add(1);
         self.selected_id = Some(info.id);
         self.element_name = info.name.clone();
         self.attribute_values = info
@@ -181,7 +185,13 @@ impl DetailEditorState {
     }
 
     fn clear(&mut self) {
+        let next_text_revision = self.text_revision.wrapping_add(1);
         *self = Self::default();
+        self.text_revision = next_text_revision;
+    }
+
+    fn mark_text_changed(&mut self) {
+        self.text_revision = self.text_revision.wrapping_add(1);
     }
 }
 
@@ -211,6 +221,7 @@ impl MainPanel {
             show_raw_xml: false,
             syntax_highlighter: SyntaxHighlighter::new(),
             detail_editor: DetailEditorState::default(),
+            encoded_image_preview: EncodedImagePreview::default(),
             history: DocumentHistory::default(),
             pending_delete_confirmation: None,
             pending_unsaved_action: None,
@@ -812,6 +823,7 @@ impl MainPanel {
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if self.show_raw_xml {
+                self.encoded_image_preview.clear();
                 self.show_raw_xml_tab(ui);
             } else {
                 self.show_details_tab(ui);
@@ -822,6 +834,9 @@ impl MainPanel {
     fn show_details_tab(&mut self, ui: &mut egui::Ui) {
         let selected = self.xml_tree_view.get_selected_info().cloned();
         self.detail_editor.sync_with_selection(selected.as_ref());
+        if selected.is_none() {
+            self.encoded_image_preview.clear();
+        }
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -948,11 +963,14 @@ impl MainPanel {
                     ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
                     ui.add_space(5.0);
                     if info.child_count == 0 {
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::multiline(&mut self.detail_editor.text_content)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(5),
                         );
+                        if response.changed() {
+                            self.detail_editor.mark_text_changed();
+                        }
                     } else {
                         let preview = info.text.as_deref().unwrap_or("");
                         Frame::new()
@@ -976,6 +994,21 @@ impl MainPanel {
                                     );
                                 }
                             });
+                    }
+
+                    if info.child_count == 0 {
+                        let previewing_unapplied_text =
+                            info.text.as_deref().unwrap_or("") != self.detail_editor.text_content;
+                        self.encoded_image_preview.show(
+                            ui,
+                            info.id,
+                            self.detail_editor.text_revision,
+                            &info.name,
+                            &self.detail_editor.text_content,
+                            previewing_unapplied_text,
+                        );
+                    } else {
+                        self.encoded_image_preview.clear();
                     }
                     ui.add_space(10.0);
 

@@ -5,6 +5,7 @@ A modern, high-performance XML/EXI viewer and editor built with Rust and egui.
 ## Features
 
 - **XML Viewing & Editing**: Parse, view, and edit XML documents with a intuitive tree interface
+- **Encoded Image Preview**: Display PNG, JPEG, GIF, WebP, and BMP images stored as Base64, image data URIs, or hexadecimal XML data
 - **EXI Support**: Efficient XML Interchange format compression and decompression
 - **JSON Export**: Export XML documents to JSON format
 - **Search**: Fast search with result caching
@@ -34,6 +35,10 @@ Run the application:
 ```bash
 cargo run --release
 ```
+
+Select a leaf element whose text contains an encoded image to see its preview in the Details
+panel. Plain Base64, `data:image/...;base64,...`, and hexadecimal image bytes (such as EtherCAT
+`ImageData16x14`) are supported, including values split across multiple XML lines.
 
 ### Keyboard Shortcuts
 

@@ -1,3 +1,4 @@
+mod base64_image;
 pub mod file_dialog;
 pub mod icons;
 pub mod loading_indicator;
