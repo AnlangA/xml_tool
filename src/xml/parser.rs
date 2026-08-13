@@ -1,3 +1,4 @@
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesRef, BytesText, Event};
 use quick_xml::reader::Reader;
 use std::path::Path;
@@ -50,7 +51,9 @@ pub fn parse_xml(content: &str) -> Result<XmlDocument> {
 
             Ok(Event::CData(e)) => {
                 if let Some(parent) = stack.last_mut() {
-                    let text = e.xml_content().context("Failed to decode CDATA section")?;
+                    let text = e
+                        .xml_content(XmlVersion::Implicit1_0)
+                        .context("Failed to decode CDATA section")?;
                     append_text(parent, &text);
                 }
             }
@@ -151,7 +154,7 @@ fn append_text_run(target: &mut String, text: &str) {
 
 fn decode_text_event(event: &BytesText<'_>) -> Result<Option<String>> {
     let content = event
-        .xml_content()
+        .xml_content(XmlVersion::Implicit1_0)
         .context("Failed to decode XML text node")?;
     Ok(normalize_text_fragment(&content).map(ToOwned::to_owned))
 }
@@ -217,13 +220,14 @@ fn collect_attributes<'a>(
         match attr_result {
             Ok(attr) => {
                 let name = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-                let value = match attr.decode_and_unescape_value(decoder) {
-                    Ok(value) => value.into_owned(),
-                    Err(err) => {
-                        log::warn!("Skipping malformed attribute '{name}': {err}");
-                        continue;
-                    }
-                };
+                let value =
+                    match attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder) {
+                        Ok(value) => value.into_owned(),
+                        Err(err) => {
+                            log::warn!("Skipping malformed attribute '{name}': {err}");
+                            continue;
+                        }
+                    };
                 element.attributes.push(XmlAttribute {
                     name,
                     value,

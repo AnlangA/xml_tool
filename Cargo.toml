@@ -11,7 +11,7 @@ categories = ["gui", "parsing", "visualization"]
 
 [dependencies]
 # XML parsing
-quick-xml = "0.39.2"
+quick-xml = "0.41"
 
 # EXI (Efficient XML Interchange) encoding/decoding
 erxi = { git = "https://github.com/schachmadinejad/erxi", default-features = false }
@@ -33,7 +33,7 @@ catppuccin-egui = { version = "5.7.0", default-features = false, features = ["eg
 
 # Performance optimization
 parking_lot = "0.12"
-lru = "0.16"
+lru = "0.18"
 
 # Icons
 egui-phosphor = { version = "0.7", optional = true }
