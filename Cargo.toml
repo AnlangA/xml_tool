@@ -10,8 +10,8 @@ keywords = ["xml", "exi", "viewer", "editor", "gui"]
 categories = ["gui", "parsing", "visualization"]
 
 [dependencies]
-# XML parsing
-quick-xml = "0.41"
+# XML engine: arena DOM, namespaces, XPath, XSD, source ranges, PullParser
+uppsala = "=0.9.0"
 
 # EXI (Efficient XML Interchange) encoding/decoding
 erxi = { git = "https://github.com/schachmadinejad/erxi", default-features = false }

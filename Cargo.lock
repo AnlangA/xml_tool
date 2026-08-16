@@ -3776,6 +3776,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
+name = "uppsala"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b83b4950a552cd9812b6afd150ea10729617d28208bba122912eb196c2261d4d"
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4734,12 +4740,12 @@ dependencies = [
  "log",
  "lru",
  "parking_lot",
- "quick-xml 0.41.0",
  "rfd",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "uppsala",
 ]
 
 [[package]]
