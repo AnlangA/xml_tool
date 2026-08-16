@@ -47,6 +47,8 @@ pub struct SearchState {
     pub session: Option<crate::services::task_manager::SessionId>,
     /// Set when the box is (re)opened: the field grabs keyboard focus.
     pub focus_pending: bool,
+    /// Replacement text for batch replace (the row under the search box).
+    pub replacement: String,
 }
 
 impl SearchState {
@@ -183,12 +185,7 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
             }
             ui.separator();
             if ui.button(shell.localization.msg("action-exit")).clicked() {
-                if shell.workspace.dirty_sessions().is_empty() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                } else {
-                    shell.after_unsaved = Some(crate::ui::shell::AfterUnsaved::Exit);
-                    shell.dialog = Some(Dialog::UnsavedExit);
-                }
+                shell.request_exit(ui.ctx());
             }
         });
         ui.menu_button(shell.localization.msg("menu-edit"), |ui| {
@@ -754,6 +751,33 @@ fn search_box(ui: &mut Ui, shell: &mut AppShell) {
         };
         ui.label(RichText::new(summary).small().color(pal.text_muted));
     });
+    // Batch replace row: one atomic BatchReplace command (single undo).
+    let mut replace_requested = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(Icons::ARROW_CLOCKWISE).color(pal.text_muted));
+        let mut replacement = shell.search.replacement.clone();
+        let response = ui.add(
+            TextEdit::singleline(&mut replacement)
+                .hint_text(shell.localization.msg("search-replace-placeholder"))
+                .desired_width(160.0),
+        );
+        if response.changed() {
+            shell.search.replacement = replacement;
+        }
+        let hits = shell.search.hits.len();
+        if ui
+            .add_enabled(
+                hits > 0,
+                egui::Button::new(shell.localization.msg("search-replace-all")),
+            )
+            .clicked()
+        {
+            replace_requested = true;
+        }
+    });
+    if replace_requested {
+        shell.replace_all();
+    }
 }
 
 /// Overlay outline drawer for narrow windows: an anchored frameless
@@ -1006,8 +1030,12 @@ pub fn banner_strip(ctx: &Context, shell: &mut AppShell) {
         return;
     }
     let pal = Palette::resolve(ctx);
-    let (path, dirty) = match &shell.banner {
-        Some(crate::ui::shell::Banner::Reload { path, dirty }) => (path.clone(), *dirty),
+    let (session_id, path, dirty) = match &shell.banner {
+        Some(crate::ui::shell::Banner::Reload {
+            session,
+            path,
+            dirty,
+        }) => (*session, path.clone(), *dirty),
         None => return,
     };
     let mut dismiss_banner = false;
@@ -1060,8 +1088,7 @@ pub fn banner_strip(ctx: &Context, shell: &mut AppShell) {
                 });
             match action {
                 Some("reload") => {
-                    let path = path.clone();
-                    shell.open_path(path);
+                    shell.reload_session(session_id, path.clone());
                     dismiss_banner = true;
                 }
                 Some("keep") | Some("ignore") => {
@@ -1208,7 +1235,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
                             );
                             let response = ui.interact(click_rect, row_id, Sense::click());
                             if response.clicked() {
-                                jump = alert.position;
+                                jump = Some((alert.position, alert.session));
                             }
                             response.on_hover_text(shell.localization.msg("problems-jump"));
                         }
@@ -1230,10 +1257,22 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
     if clear_all {
         shell.alerts.clear();
     }
-    if let Some(position) = jump {
-        shell.source_jump = Some(position);
-        shell.pending_scroll = Some(position);
-        shell.focus = FocusPane::Source;
+    if let Some((position, session)) = jump {
+        // Jump belongs to the alert's session: switch to its tab first.
+        if let Some(session) = session
+            && let Some(index) = shell
+                .workspace
+                .sessions()
+                .iter()
+                .position(|s| s.id == session)
+        {
+            shell.workspace.select(index);
+        }
+        if let Some(position) = position {
+            shell.source_jump = Some(position);
+            shell.pending_scroll = Some(position);
+            shell.focus = FocusPane::Source;
+        }
     }
     if collapse_requested {
         shell.problems_panel_open = false;

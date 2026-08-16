@@ -22,7 +22,6 @@ action-exit = Exit
 action-undo = Undo
 action-redo = Redo
 action-find = Find
-action-replace = Replace
 action-format = Format Document
 action-xpath = XPath Query…
 action-validate-with = Validate with schema…
@@ -55,8 +54,6 @@ toolbar-format = Format the document
 
 outline-expand-all = Expand all
 outline-collapse-all = Collapse all
-outline-copy-xpath = Copy XPath
-outline-copy-xml = Copy XML
 outline-duplicate = Duplicate node
 outline-delete = Delete node
 outline-empty = Nothing to show
@@ -136,7 +133,6 @@ source-draft-active = Draft contains unapplied changes
 source-jump-line = Jump to line
 
 exi-open-workbench = Open EXI workbench
-exi-not-ready = EXI workbench arrives in step 8
 exi-dialog-title = EXI Workbench
 exi-encode = Encode document
 exi-decode = Decode EXI file…
@@ -149,6 +145,8 @@ exi-fidelity-warning = These options drop: {items}
 
 search-placeholder = Search…
 search-hits = { $count } hits
+search-replace-placeholder = Replace with…
+search-replace-all = Replace all
 search-no-hits = No matches
 search-case-sensitive = Match case
 

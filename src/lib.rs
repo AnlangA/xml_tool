@@ -4,9 +4,10 @@
 //! caching, and UI modules used by the desktop binary.
 //!
 //! Current behavior and limits:
-//! - XML editing is structured around the in-memory tree model.
-//! - Qualified names are preserved, but namespace-aware editing is not yet implemented.
-//! - Processing instructions and doctypes are tolerated on parse, but not modeled for editing.
+//! - XML editing is structured around the `core` arena document model with
+//!   command-based, undoable mutations and byte-faithful source splicing.
+//! - Namespaces, processing instructions, comments, and CDATA are modeled
+//!   and editable; doctypes are preserved on parse.
 //! - JSON export preserves mixed-content order with an `@content` array.
 //!
 pub mod app;

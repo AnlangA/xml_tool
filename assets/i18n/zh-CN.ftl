@@ -22,7 +22,6 @@ action-exit = 退出
 action-undo = 撤销
 action-redo = 重做
 action-find = 查找
-action-replace = 替换
 action-format = 格式化文档
 action-xpath = XPath 查询…
 action-validate-with = 用 Schema 验证…
@@ -55,8 +54,6 @@ toolbar-format = 格式化文档
 
 outline-expand-all = 全部展开
 outline-collapse-all = 全部折叠
-outline-copy-xpath = 复制 XPath
-outline-copy-xml = 复制 XML
 outline-duplicate = 重复节点
 outline-delete = 删除节点
 outline-empty = 暂无内容
@@ -136,7 +133,6 @@ source-draft-active = 草稿包含未应用的更改
 source-jump-line = 跳转到行
 
 exi-open-workbench = 打开 EXI 工作台
-exi-not-ready = EXI 工作台将在第 8 步提供
 exi-dialog-title = EXI 工作台
 exi-encode = 编码当前文档
 exi-decode = 解码 EXI 文件…
@@ -149,6 +145,8 @@ exi-fidelity-warning = 当前选项将丢弃：{items}
 
 search-placeholder = 搜索…
 search-hits = { $count } 个结果
+search-replace-placeholder = 替换为…
+search-replace-all = 全部替换
 search-no-hits = 无匹配
 search-case-sensitive = 区分大小写
 

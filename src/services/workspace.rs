@@ -132,11 +132,13 @@ impl WorkspaceState {
     /// Focuses the session for `path` if one is already open, returning its
     /// index. Opening the same file twice must not create a second session.
     pub fn focus_existing(&mut self, path: &Path) -> Option<usize> {
+        // Watcher events carry canonical paths while session paths may be
+        // relative — compare canonically so the same file never opens twice.
+        let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let index = self.sessions.iter().position(|session| {
-            session
-                .path
-                .as_deref()
-                .is_some_and(|existing| existing == path)
+            session.path.as_deref().is_some_and(|existing| {
+                std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf()) == wanted
+            })
         })?;
         self.active_index = Some(index);
         Some(index)
@@ -183,6 +185,28 @@ impl WorkspaceState {
             mode: DocumentMode::Editable,
             document,
             history: History::new(),
+            cursor: 0,
+            selection: None,
+            source_draft: None,
+        });
+        self.active_index = Some(self.sessions.len() - 1);
+        id
+    }
+
+    /// Adds a crash-recovered document. Pathless snapshots stay untitled;
+    /// the session is marked dirty so closing prompts for a real save.
+    pub fn add_restored(&mut self, path: Option<PathBuf>, document: XmlDocument) -> SessionId {
+        let id = SessionId(self.next_session);
+        self.next_session += 1;
+        let mut history = History::new();
+        history.mark_dirty();
+        self.sessions.push(DocumentSession {
+            id,
+            path,
+            file_type: FileType::Xml,
+            mode: DocumentMode::Editable,
+            document,
+            history,
             cursor: 0,
             selection: None,
             source_draft: None,

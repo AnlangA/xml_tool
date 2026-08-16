@@ -82,29 +82,20 @@ pub fn diff_xml(
     left_keys.sort();
     right_keys.sort();
     if left_keys == right_keys {
-        // Same multiset of content: any non-trivial alignment is a move.
-        if entries.is_empty() && positions_differ(&left_items, &right_items) {
-            for item in &left_items {
-                entries.push(DiffEntry::Moved {
-                    label: item.label.clone(),
-                });
-            }
-        } else {
-            entries.clear();
-            if positions_differ(&left_items, &right_items) {
-                for item in &left_items {
-                    entries.push(DiffEntry::Moved {
-                        label: item.label.clone(),
-                    });
-                }
-            }
-        }
+        // Same content multiset: only items whose partner sits at a
+        // different index are moves — not the whole document.
+        let moved: Vec<DiffEntry> = left_items
+            .iter()
+            .zip(right_items.iter())
+            .filter(|(left, right)| left.key != right.key)
+            .map(|(left, _)| DiffEntry::Moved {
+                label: left.label.clone(),
+            })
+            .collect();
+        entries.clear();
+        entries.extend(moved);
     }
     Ok(entries)
-}
-
-fn positions_differ(left: &[Item], right: &[Item]) -> bool {
-    left.iter().map(|i| &i.key).ne(right.iter().map(|i| &i.key))
 }
 
 struct Item {
@@ -123,13 +114,24 @@ fn sequence(document: &XmlDocument, options: DiffOptions) -> Vec<Item> {
 }
 
 fn walk(document: &XmlDocument, node: NodeId, items: &mut Vec<Item>, options: DiffOptions) {
+    // Field separators: \x1f/\x1e are illegal in XML 1.0 names and content,
+    // so key concatenation is unambiguous (`a="1 b=2"` vs `a="1" b="2"`).
+    const FIELD: char = '\u{1f}';
+    const PAIR: char = '\u{1e}';
     let mut sorted_attrs = document.attributes(node);
     sorted_attrs.sort();
     let mut key = document.qname(node).map(|q| q.render()).unwrap_or_default();
     for (name, value) in &sorted_attrs {
-        key.push_str(&format!(" {name}={value}"));
+        key.push(FIELD);
+        key.push_str(name);
+        key.push(PAIR);
+        key.push_str(value);
     }
-    let label = key.clone();
+    let label = document.qname(node).map(|q| q.render()).unwrap_or_default();
+    let mut label = label;
+    for (name, value) in &sorted_attrs {
+        label.push_str(&format!(" {name}=\"{value}\""));
+    }
 
     // Direct text content (normalized): formatting whitespace collapses.
     let mut text = String::new();
@@ -139,21 +141,25 @@ fn walk(document: &XmlDocument, node: NodeId, items: &mut Vec<Item>, options: Di
                 let content = document.node_text(child).unwrap_or_default();
                 let normalized = normalize_whitespace(content);
                 if !normalized.is_empty() {
+                    text.push(FIELD);
                     text.push_str(&normalized);
                 }
             }
             Some(XmlNodeKind::CData) => {
+                text.push(FIELD);
                 text.push_str("<![CDATA[");
                 text.push_str(document.node_text(child).unwrap_or_default());
                 text.push_str("]]>");
             }
             Some(XmlNodeKind::Comment) if options.include_comments_and_pis => {
+                text.push(FIELD);
                 text.push_str("<!--");
                 text.push_str(document.comment_text(child).unwrap_or_default());
                 text.push_str("-->");
             }
             Some(XmlNodeKind::ProcessingInstruction) if options.include_comments_and_pis => {
                 if let Some((target, data)) = document.pi(child) {
+                    text.push(FIELD);
                     match data {
                         Some(data) => text.push_str(&format!("<?{target} {data}?>")),
                         None => text.push_str(&format!("<?{target}?>")),

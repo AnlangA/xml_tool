@@ -364,6 +364,7 @@ fn reload_banner_is_non_blocking_and_dismissable() {
     harness.set_size(egui::vec2(1280.0, 800.0));
     harness.run();
     harness.state_mut().banner = Some(xml_tool::ui::shell::Banner::Reload {
+        session: xml_tool::services::task_manager::SessionId(0),
         path: std::path::PathBuf::from("/tmp/watched.xml"),
         dirty: false,
     });

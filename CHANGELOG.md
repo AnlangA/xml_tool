@@ -57,6 +57,32 @@
   (`OutlineCache`, unused search index slot, unreachable drawer branches)
   removed; toolbar/menu undo-redo enablement unified.
 
+### Fixes (round 3)
+- The window close button now routes through the unsaved-changes dialog
+  instead of discarding edits; saving an untitled document falls back to
+  Save As instead of silently doing nothing.
+- The file-changed banner's Reload actually reloads the session
+  (previously a no-op that could even open a duplicate tab); path
+  comparisons are canonicalized everywhere.
+- Crash-recovery restore marks sessions dirty, keeps untitled snapshots
+  pathless, and deletes consumed snapshots (no more repeat prompts).
+- `.exi` files open as decoded, read-only XML views (previously every
+  EXI open failed with a parse error).
+- XPath/XSD/diff/EXI encode and their file pickers run on worker threads —
+  no more multi-second UI freezes on large documents.
+- Structural diff: attribute/text keys no longer collide across field
+  boundaries; swapping two siblings reports two moves instead of marking
+  the whole document moved.
+- Problems-panel jumps switch to the alert's owning tab first.
+- Find panel gains a batch-replace row (one atomic undoable
+  `BatchReplace`), matching the documented Ctrl+H shortcut.
+- XPath dialog auto-focuses its field and Enter runs the query.
+- Zoom/theme preferences apply on change only (no longer fight egui's
+  built-in zoom gestures); the Chinese bundle uses a `zh-CN` langid.
+- Removed the unused `parking_lot`/`lru`/`thiserror` dependencies, dead
+  icon aliases, and stale `.ftl` keys; README claims trimmed to what the
+  UI actually exposes.
+
 ### Cleanup
 - Removed the unused `egui_extras` dependency and the legacy
   `ui::xml_tree`/`cache` modules (~840 lines of dead code); the tree

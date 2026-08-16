@@ -410,6 +410,31 @@ fn diff_detects_moves() {
     );
 }
 
+#[test]
+fn diff_does_not_report_unmoved_items_as_moves() {
+    // Swapping two siblings moves exactly those two — not every node.
+    let left = parse("<r><keep/><a/><b/></r>");
+    let right = parse("<r><keep/><b/><a/></r>");
+    let entries = diff_xml(&left, &right, DiffOptions::default()).unwrap();
+    let moves = entries
+        .iter()
+        .filter(|entry| matches!(entry, DiffEntry::Moved { .. }))
+        .count();
+    assert_eq!(moves, 2, "only the swapped siblings are moves: {entries:?}");
+}
+
+#[test]
+fn diff_keys_do_not_collide_across_attribute_boundaries() {
+    // `a="1 b=2"` (one attribute) must not equal `a="1" b="2"` (two).
+    let left = parse("<r><e a=\"1 b=2\"/></r>");
+    let right = parse("<r><e a=\"1\" b=\"2\"/></r>");
+    let entries = diff_xml(&left, &right, DiffOptions::default()).unwrap();
+    assert!(
+        !entries.is_empty(),
+        "different attribute sets must not compare equal"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Batch replace: preview, apply, undo on 1,000 hits
 // ---------------------------------------------------------------------------
