@@ -13,6 +13,7 @@ pub mod app;
 pub mod cache;
 pub mod exi;
 pub mod export;
+pub mod fixtures;
 pub mod ui;
 pub mod utils;
 pub mod xml;

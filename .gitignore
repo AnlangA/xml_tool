@@ -29,5 +29,8 @@ Thumbs.db
 # Test outputs
 /test-output/
 
+# Generated large fixtures (regenerate with: cargo run --example gen_fixtures)
+/test_files/generated/
+
 # Benchmark results
 /target/criterion/

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- full-fidelity.xml: exercises every construct the editor must preserve -->
+<!DOCTYPE library [
+<!ENTITY publisher "Mason &amp; Sons">
+<!ENTITY licence "MIT">
+]>
+<?xml-stylesheet type="text/xsl" href="catalog.xsl"?>
+<library xmlns="urn:example:library" xmlns:dc="urn:example:dc" xml:lang="en">
+  <book id="b-001" dc:issued="2024-03-01" draft="false">
+    <title>Efficient XML</title>
+    <summary>Published by &publisher; under &licence;; 5 &lt; 6 &amp; 7 &gt; 2.</summary>
+    <excerpt><![CDATA[if (a < b && c > d) { emit("raw <text>"); }]]></excerpt>
+    <!-- editor notes follow -->
+    <notes type="mixed">Lead &publisher; middle <em>emphasised</em> tail<!-- inline note --><?refresh hint="daily"?> end</notes>
+    <meta:review xmlns:meta="urn:example:meta" score="5">compact</meta:review>
+    <placeholder/>
+  </book>
+  <book id="b-002" dc:issued="2025-11-30">
+    <title lang='zh'>中文标题 Ünïcødé</title>
+    <summary>CDATA with <b>markup-ish</b> text: <![CDATA[x < y]]></summary>
+  </book>
+</library>

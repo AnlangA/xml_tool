@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- crlf.xml: Windows line endings must survive load and save -->
+<invoice currency="EUR" version="1">
+  <line no="1">
+    <qty>2</qty>
+    <price>19.90</price>
+  </line>
+  <line no="2">
+    <qty>1</qty>
+    <price>5.00</price>
+  </line>
+  <total>44.80</total>
+</invoice>
