@@ -8,7 +8,11 @@
 //! live document, so stale completions can never clobber newer edits.
 
 pub mod document_io;
+pub mod large_file;
+pub mod outline;
 pub mod recovery;
+pub mod search;
+pub mod source_buffer;
 pub mod task_manager;
 pub mod watcher;
 pub mod workspace;
