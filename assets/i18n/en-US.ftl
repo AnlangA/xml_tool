@@ -41,9 +41,12 @@ panel-source = Source
 panel-diff = Diff
 panel-exi = EXI Result
 panel-empty = No document open
+welcome-title = Welcome to XML Tool
+welcome-hint = Open an XML file or create a new document to get started.
 
 tab-untitled = Untitled-{ $number }
 tab-dirty = { $name } ●
+tab-close = Close tab
 
 toolbar-open-file = Open a file
 toolbar-save-file = Save the current file
@@ -102,6 +105,7 @@ dialog-delete-body = Delete { $name } and its { $descendants ->
 }? This can be undone.
 dialog-confirm = Delete
 dialog-cancel = Cancel
+dialog-run = Run
 
 dialog-about-title = About { $name }
 dialog-about-version = Version { $version }

@@ -190,15 +190,11 @@ impl TaskManager {
     /// Requests cancellation of `job`; its result, if it arrives, is
     /// discarded.
     pub fn cancel(&self, job: JobId) {
-        if let Some(pending) = self
-            .pending
-            .lock()
-            .expect("pending jobs lock")
-            .iter()
-            .find(|pending| pending.spec.job == job)
-        {
-            pending.cancel.store(true, Ordering::SeqCst);
+        let mut pending = self.pending.lock().expect("pending jobs lock");
+        if let Some(entry) = pending.iter().find(|pending| pending.spec.job == job) {
+            entry.cancel.store(true, Ordering::SeqCst);
         }
+        pending.retain(|pending| pending.spec.job != job);
     }
 
     /// Cancels every job attributed to `session`.
@@ -227,6 +223,11 @@ impl TaskManager {
                 receiver.try_recv()?
             };
             let (spec, cancel, payload) = received;
+            // Delivered (or discarded): the job is no longer pending.
+            self.pending
+                .lock()
+                .expect("pending jobs lock")
+                .retain(|pending| pending.spec.job != spec.job);
             if cancel.load(Ordering::SeqCst) {
                 continue; // cancelled job: drop
             }

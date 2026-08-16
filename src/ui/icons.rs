@@ -25,6 +25,10 @@ impl Icons {
     pub const SEARCH: &'static str = regular::MAGNIFYING_GLASS;
     pub const ARROW_COUNTER_CLOCKWISE: &'static str = regular::ARROW_COUNTER_CLOCKWISE;
     pub const CLOSE: &'static str = regular::X;
+    pub const TREE_STRUCTURE: &'static str = regular::TREE_STRUCTURE;
+    pub const SLIDERS_HORIZONTAL: &'static str = regular::SLIDERS_HORIZONTAL;
+    pub const CARET_RIGHT: &'static str = regular::CARET_RIGHT;
+    pub const CARET_DOWN: &'static str = regular::CARET_DOWN;
 }
 
 /// Loads the Phosphor regular variant into the given definitions.

@@ -41,9 +41,12 @@ panel-source = 源码
 panel-diff = 差异
 panel-exi = EXI 结果
 panel-empty = 未打开文档
+welcome-title = 欢迎使用 XML Tool
+welcome-hint = 打开一个 XML 文件，或新建文档开始编辑。
 
 tab-untitled = 未命名-{ $number }
 tab-dirty = { $name } ●
+tab-close = 关闭标签页
 
 toolbar-open-file = 打开文件
 toolbar-save-file = 保存当前文件
@@ -102,6 +105,7 @@ dialog-delete-body = 删除 { $name } 及其 { $descendants ->
 }？此操作可以撤销。
 dialog-confirm = 删除
 dialog-cancel = 取消
+dialog-run = 运行
 
 dialog-about-title = 关于 { $name }
 dialog-about-version = 版本 { $version }

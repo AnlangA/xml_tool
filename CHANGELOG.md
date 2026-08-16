@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### UI overhaul
+- Dynamic light/dark palettes: all custom widgets resolve Catppuccin
+  Latte/Mocha per frame instead of hard-coded dark colors.
+- Source view renders live XML syntax highlighting (disabled above 200k
+  characters to keep huge documents responsive).
+- Modernized shell: single-row menu+toolbar header, restyled document
+  tabs, full-row outline selection with accent bar, rounded hover states
+  in the problems panel, panel headings with icons.
+- Empty workspace shows a centered welcome view (New/Open actions); side
+  panels and the tab strip stay hidden until a document is open.
+- Toolbar disables document actions when no session is active; tooltips
+  show keyboard shortcuts.
+
+### Fixes
+- Encoding declarations in single quotes are now verified (mismatches
+  were silently ignored).
+- Undo of top-level node deletions (comments/PIs beside the root) works;
+  failed undo/redo no longer drops the history entry.
+- PI edits preserve `<?pi?>` without inventing empty data.
+- Unsaved-changes dialog actually completes the requested action (save &
+  exit/close, discard & exit/close) instead of just closing the dialog.
+- Saving writes the visible source (including a pending draft); our own
+  saves no longer trigger the "file changed on disk" banner; Save As
+  re-points the file watcher at the new path.
+- Apply-source results no longer overwrite keystrokes typed while the
+  parse job was running; Shift+F3 with no hits no longer underflows;
+  unterminated CDATA no longer hides characters in the source view.
+- Ctrl+Z/Y inside text fields now reach the field's own undo; search hits
+  are rebuilt when switching tabs; the delete confirmation counts the
+  node's subtree instead of the whole document.
+- Closing a tab frees its caches; background-job bookkeeping no longer
+  grows unbounded; concurrent saves of one file use unique temp names.
+
+### Cleanup
+- Removed the unused `egui_extras` dependency and the legacy
+  `ui::xml_tree`/`cache` modules (~840 lines of dead code); the tree
+  search benchmark now measures `services::search::SearchIndex`.
+
 ## 0.3.0 — Professional upgrade
 
 Complete re-architecture from the 0.2.0 demo editor to a professional

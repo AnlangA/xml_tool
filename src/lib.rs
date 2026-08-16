@@ -10,7 +10,6 @@
 //! - JSON export preserves mixed-content order with an `@content` array.
 //!
 pub mod app;
-pub mod cache;
 pub mod core;
 pub mod exi;
 pub mod export;

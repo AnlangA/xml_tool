@@ -256,6 +256,30 @@ fn menu_click_new_creates_a_document() {
     );
 }
 
+#[test]
+fn welcome_view_offers_new_and_open_actions() {
+    let mut shell = AppShell::new();
+    shell.localization.set_language(Language::English);
+    let mut harness = Harness::new_state(|ctx, shell| shell.update(ctx), shell);
+    harness.set_size(egui::vec2(1280.0, 800.0));
+    harness.run();
+    assert_eq!(harness.state().workspace.sessions().len(), 0);
+    assert!(
+        harness
+            .query_all_by_label_contains("Welcome to XML Tool")
+            .next()
+            .is_some(),
+        "empty workspace renders the welcome view"
+    );
+    harness.get_by_label_contains("New").click();
+    harness.run();
+    assert_eq!(
+        harness.state().workspace.sessions().len(),
+        1,
+        "welcome New button must create a document"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Alert handling (step "优化告警处理")
 // ---------------------------------------------------------------------------

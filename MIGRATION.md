@@ -10,8 +10,8 @@ available; new code should move to the engine layer.
 | `xml::parse_xml(&str)` | kept (facade) | `core::document::XmlDocument::parse(&[u8])` |
 | `xml::parse_xml_file(&Path)` | kept (facade) | read bytes → `XmlDocument::parse` |
 | `xml::serialize_xml(&XmlDocument)` | kept (facade) | `services::document_io::document_bytes` |
-| `xml::encode_xml_to_exi` | kept (facade) | `services::exi_workbench::encode_with_settings` |
-| `xml::decode_exi_to_xml` | kept (facade) | `services::exi_workbench::decode_with_report` |
+| `exi::encode_xml_to_exi` | kept | `services::exi_workbench::encode_with_settings` |
+| `exi::decode_exi_to_xml` | kept | `services::exi_workbench::decode_with_report` |
 
 New public surfaces:
 

@@ -7,8 +7,6 @@
 
 use egui::{Context, ThemePreference};
 
-use super::theme;
-
 /// Light/dark selection with a system-following default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -66,11 +64,28 @@ impl FontScale {
     }
 }
 
-/// Catppuccin palette variant matching the current egui theme.
+/// Installs the Catppuccin palette matching the current egui theme, plus
+/// the shared spacing/radius tweaks that give the shell its density.
 pub fn apply_accent_theme(ctx: &Context) {
     match ctx.theme() {
         egui::Theme::Light => catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE),
         egui::Theme::Dark => catppuccin_egui::set_theme(ctx, catppuccin_egui::MOCHA),
     }
-    let _ = theme::Theme::ACCENT; // palette stays available to custom widgets
+
+    ctx.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.spacing.menu_margin = egui::Margin::symmetric(8, 6);
+        style.spacing.window_margin = egui::Margin::symmetric(12, 10);
+        style.spacing.indent = 16.0;
+
+        let radius = egui::CornerRadius::same(6);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(8);
+        style.visuals.menu_corner_radius = radius;
+        style.visuals.widgets.noninteractive.corner_radius = radius;
+        style.visuals.widgets.inactive.corner_radius = radius;
+        style.visuals.widgets.hovered.corner_radius = radius;
+        style.visuals.widgets.active.corner_radius = radius;
+        style.visuals.widgets.open.corner_radius = radius;
+    });
 }

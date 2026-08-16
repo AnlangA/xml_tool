@@ -107,6 +107,11 @@ pub struct AppShell {
     /// Narrow-layout drawers (default open so panels stay reachable).
     pub show_outline_drawer: bool,
     pub show_inspector_drawer: bool,
+    /// What the unsaved-changes dialog continues with when confirmed.
+    pub(crate) after_unsaved: Option<AfterUnsaved>,
+    /// Paths we saved recently: watcher events for these are our own
+    /// writes, not external modifications.
+    pub(crate) recent_saves: HashMap<PathBuf, std::time::Instant>,
 }
 
 impl AppShell {
@@ -136,6 +141,8 @@ impl AppShell {
             fonts_installed: false,
             show_outline_drawer: true,
             show_inspector_drawer: true,
+            after_unsaved: None,
+            recent_saves: HashMap::new(),
         }
     }
 
@@ -169,6 +176,12 @@ impl AppShell {
         self.poll_background_jobs();
         self.poll_file_watcher();
         self.frames.record("background-poll", started.elapsed());
+        // Search hits are session-scoped; switching tabs rebuilds them.
+        let active_id = self.workspace.active_id();
+        if self.search.session != active_id {
+            self.search.session = active_id;
+            self.refresh_search();
+        }
         self.handle_shortcuts(ctx);
 
         if self.alerts.panel_requested {
@@ -179,7 +192,9 @@ impl AppShell {
         panels::top_bar(ctx, self);
         self.frames.record("top-bar", started.elapsed());
         panels::banner_strip(ctx, self);
-        panels::document_tabs(ctx, self);
+        if self.workspace.active().is_some() {
+            panels::document_tabs(ctx, self);
+        }
         panels::bottom_panel(ctx, self);
         let started = std::time::Instant::now();
         self.layout_panels(ctx);
@@ -224,7 +239,8 @@ impl AppShell {
 
     /// Saves the active document in a background job. The bytes saved are
     /// those of the revision at spawn time; if the user keeps editing, the
-    /// tab stays dirty when the job finishes.
+    /// tab stays dirty when the job finishes. A pending source draft is
+    /// what the user sees, so its text is what gets written.
     pub fn save_active(&mut self, path: Option<PathBuf>) -> bool {
         let Some(session) = self.workspace.active_mut() else {
             return false;
@@ -237,12 +253,25 @@ impl AppShell {
         };
         let session_id = session.id;
         let revision = session.document.revision();
-        let source = session.document.source().to_string();
+        let source = session
+            .source_draft
+            .as_ref()
+            .map(|draft| draft.buffer.text())
+            .unwrap_or_else(|| session.document.source().to_string());
         let encoding = session.document.encoding();
-        if session.path.is_none() {
-            session.path = Some(path.clone()); // Save As assigns immediately
+        // Save As re-targets the session; re-point the file watcher too.
+        let retargeted = session.path.as_ref() != Some(&path);
+        if retargeted {
+            let old_path = session.path.clone();
+            session.path = Some(path.clone());
+            if let Some(watcher) = self.watcher.as_mut() {
+                if let Some(old) = old_path {
+                    watcher.unwatch(&old);
+                }
+                let _ = watcher.watch(&path);
+            }
         }
-        let job_path = path;
+        let job_path = path.clone();
         self.tasks
             .spawn(SAVE_SESSION, crate::core::Revision(0), move |_| {
                 let bytes = crate::xml::encoding::encode_xml_text(&source, encoding);
@@ -251,10 +280,58 @@ impl AppShell {
                 Box::new(SaveJobResult {
                     session: session_id,
                     revision,
+                    path,
                     outcome,
                 })
             });
         true
+    }
+
+    /// Synchronously saves every dirty session that has a path. Used by the
+    /// exit/close-tab flows, where a background job would not finish before
+    /// the window closes. Returns the number of sessions that could not be
+    /// saved (untitled documents without a path count as failures).
+    pub(crate) fn save_dirty_sessions_sync(&mut self) -> usize {
+        let mut failures = 0;
+        for index in 0..self.workspace.sessions().len() {
+            self.workspace.select(index);
+            let Some(session) = self.workspace.active() else {
+                continue;
+            };
+            if !session.is_dirty() || session.mode == DocumentMode::LargeReadOnly {
+                continue;
+            }
+            let session_id = session.id;
+            let Some(path) = session.path.clone() else {
+                failures += 1;
+                continue;
+            };
+            let source = session
+                .source_draft
+                .as_ref()
+                .map(|draft| draft.buffer.text())
+                .unwrap_or_else(|| session.document.source().to_string());
+            let bytes = crate::xml::encoding::encode_xml_text(&source, session.document.encoding());
+            match save_bytes_atomically(&path, &bytes) {
+                Ok(()) => {
+                    if let Some(session) = self.workspace.active_mut() {
+                        session.mark_saved();
+                    }
+                    self.recovery.remove(session_id.0);
+                    self.recent_saves
+                        .insert(canonical_path(&path), std::time::Instant::now());
+                }
+                Err(err) => {
+                    failures += 1;
+                    let text = self.localization.msg_with(
+                        "error-io",
+                        Some(&fluent_args!("message" => err.to_string())),
+                    );
+                    self.push_problem(Severity::Error, "io", text);
+                }
+            }
+        }
+        failures
     }
 
     /// Commits an editing command on the active session.
@@ -319,6 +396,7 @@ impl AppShell {
             .active()
             .is_some_and(|session| session.is_dirty())
         {
+            self.after_unsaved = Some(AfterUnsaved::CloseTab);
             self.dialog = Some(Dialog::UnsavedExit);
             return;
         }
@@ -328,6 +406,8 @@ impl AppShell {
     fn close_tab_silent(&mut self) {
         if let Some(session) = self.workspace.active() {
             self.recovery.remove(session.id.0);
+            self.cache.invalidate_session(session.id);
+            self.expanded.remove(&session.id);
             if let Some(path) = session.path.clone()
                 && let Some(watcher) = self.watcher.as_mut()
             {
@@ -415,6 +495,8 @@ impl AppShell {
                 .expect("save job payload type");
             match payload.outcome {
                 Ok(()) => {
+                    self.recent_saves
+                        .insert(canonical_path(&payload.path), std::time::Instant::now());
                     let mut recovery_remove = None;
                     if let Some(session) = self
                         .workspace
@@ -441,10 +523,37 @@ impl AppShell {
         let Some(watcher) = self.watcher.as_mut() else {
             return;
         };
+        // Own writes are not external modifications: suppress events for
+        // paths we saved in the last few seconds.
+        let now = std::time::Instant::now();
+        self.recent_saves
+            .retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(3));
         for change in watcher.poll_changes() {
             let path = change.path().to_path_buf();
+            let canonical = canonical_path(&path);
+            if self.recent_saves.contains_key(&canonical) {
+                continue;
+            }
+            let matching = self
+                .workspace
+                .sessions()
+                .iter()
+                .filter(|session| {
+                    session
+                        .path
+                        .as_deref()
+                        .is_some_and(|p| canonical_path(p) == canonical)
+                })
+                .count();
+            if matching == 0 {
+                continue; // not an open document (stale watch entry)
+            }
             let dirty = self.workspace.sessions().iter().any(|session| {
-                session.path.as_deref() == Some(change.path()) && session.is_dirty()
+                session
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| canonical_path(p) == canonical)
+                    && session.is_dirty()
             });
             self.banner = Some(Banner::Reload { path, dirty });
         }
@@ -458,20 +567,23 @@ impl AppShell {
         let width = ctx.content_rect().width();
         let inspector_inline = width >= 1100.0;
         let outline_inline = width >= 850.0;
+        // Empty workspace: side panels and drawers stay hidden, the welcome
+        // view owns the whole window.
+        let has_document = self.workspace.active().is_some();
 
-        if outline_inline {
+        if has_document && outline_inline {
             panels::outline_panel(ctx, self, false);
         }
-        if inspector_inline {
+        if has_document && inspector_inline {
             panels::inspector_panel(ctx, self, false);
         }
         panels::central_panel(ctx, self);
         // Narrow windows: panels become overlay drawers (drawn after and
         // above the central panel).
-        if !outline_inline && self.show_outline_drawer {
+        if has_document && !outline_inline && self.show_outline_drawer {
             panels::outline_drawer(ctx, self);
         }
-        if !inspector_inline && self.show_inspector_drawer {
+        if has_document && !inspector_inline && self.show_inspector_drawer {
             panels::inspector_drawer(ctx, self);
         }
     }
@@ -544,6 +656,10 @@ impl AppShell {
         let wants =
             |shortcut: KeyboardShortcut| ctx.input_mut(|input| input.consume_shortcut(&shortcut));
 
+        // While a text field owns the keyboard, Ctrl+Z/Y belong to its
+        // built-in editing undo — the shell must not consume them.
+        let text_editing = ctx.wants_keyboard_input();
+
         if wants(new) {
             self.new_document();
         }
@@ -559,10 +675,10 @@ impl AppShell {
         if wants(close) {
             self.close_active_tab();
         }
-        if wants(undo) {
+        if !text_editing && wants(undo) {
             self.undo();
         }
-        if wants(redo) {
+        if !text_editing && wants(redo) {
             self.redo();
         }
         if wants(find) {
@@ -613,6 +729,7 @@ impl AppShell {
                     session: session_id,
                     base_revision,
                     outcome: crate::services::source_editor::parse_draft(&draft_text),
+                    draft_text,
                 })
             });
         true
@@ -666,6 +783,15 @@ impl AppShell {
         };
         if session.document.revision() != payload.base_revision {
             return; // document moved on: the draft stays unapplied
+        }
+        if session
+            .source_draft
+            .as_ref()
+            .map(|draft| draft.buffer.text())
+            .as_deref()
+            != Some(payload.draft_text.as_str())
+        {
+            return; // draft edited (or discarded) after Apply: keep typing
         }
         match payload.outcome {
             crate::services::source_editor::ApplyOutcome::Parsed { new_source } => {
@@ -915,6 +1041,9 @@ impl Default for AppShell {
 pub struct ApplyJobResult {
     pub session: SessionId,
     pub base_revision: crate::core::Revision,
+    /// The draft text that was parsed; results apply only when the draft
+    /// still holds exactly this text (keystrokes after "Apply" win).
+    pub draft_text: String,
     pub outcome: crate::services::source_editor::ApplyOutcome,
 }
 
@@ -922,7 +1051,23 @@ pub struct ApplyJobResult {
 pub struct SaveJobResult {
     pub session: SessionId,
     pub revision: crate::core::Revision,
+    pub path: PathBuf,
     pub outcome: Result<(), String>,
+}
+
+/// Canonicalizes for path comparisons (watcher events are canonical,
+/// session paths may not be); falls back to the input on error.
+pub(crate) fn canonical_path(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// What to do after the unsaved-changes dialog completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterUnsaved {
+    /// Close the whole window.
+    Exit,
+    /// Close only the active tab.
+    CloseTab,
 }
 
 /// Payload of the background open job.

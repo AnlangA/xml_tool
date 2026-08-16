@@ -1,7 +1,14 @@
+//! XML syntax highlighting for the source view.
+//!
+//! The tokenizer produces `(color, text)` segments colored from the
+//! per-frame [`Palette`], so highlighting follows the active light/dark
+//! theme. `highlight_layout_job` packages the segments into a single
+//! [`LayoutJob`] suitable for `TextEdit::layouter`.
+
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId};
 
-use super::theme::Theme as AppTheme;
+use super::theme::Palette;
 
 /// Syntax highlighter for XML code.
 pub struct SyntaxHighlighter;
@@ -18,16 +25,16 @@ impl SyntaxHighlighter {
     }
 
     /// Highlight XML text and return styled segments using the app's single tokenizer path.
-    pub fn highlight_xml(&self, text: &str) -> Vec<(Color32, String)> {
-        tokenize_xml(text)
+    pub fn highlight_xml(&self, palette: &Palette, text: &str) -> Vec<(Color32, String)> {
+        tokenize_xml(palette, text)
     }
 
     /// Highlight XML and split it into per-line layout jobs for code-style viewing.
-    pub fn highlight_xml_lines(&self, text: &str) -> Vec<LayoutJob> {
+    pub fn highlight_xml_lines(&self, palette: &Palette, text: &str) -> Vec<LayoutJob> {
         let font_id = FontId::monospace(12.0);
         let mut lines = vec![LayoutJob::default()];
 
-        for (color, segment) in self.highlight_xml(text) {
+        for (color, segment) in self.highlight_xml(palette, text) {
             let format = TextFormat {
                 font_id: font_id.clone(),
                 color,
@@ -52,9 +59,32 @@ impl SyntaxHighlighter {
 
         lines
     }
+
+    /// Highlight XML into a single [`LayoutJob`] for `TextEdit::layouter`.
+    pub fn highlight_layout_job(
+        &self,
+        palette: &Palette,
+        text: &str,
+        font_id: FontId,
+        wrap_width: f32,
+    ) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = wrap_width;
+
+        for (color, segment) in self.highlight_xml(palette, text) {
+            let format = TextFormat {
+                font_id: font_id.clone(),
+                color,
+                ..Default::default()
+            };
+            job.append(&segment, 0.0, format);
+        }
+
+        job
+    }
 }
 
-fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
+fn tokenize_xml(palette: &Palette, text: &str) -> Vec<(Color32, String)> {
     let mut result = Vec::new();
     let mut index = 0;
 
@@ -66,7 +96,7 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
                 .find("-->")
                 .map(|offset| offset + 3)
                 .unwrap_or(rest.len());
-            push_colored(&mut result, AppTheme::SYNTAX_COMMENT, &rest[..end]);
+            push_colored(&mut result, palette.syntax_comment, &rest[..end]);
             index += end;
             continue;
         }
@@ -77,20 +107,26 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
                 .map(|offset| offset + 3)
                 .unwrap_or(rest.len());
             let cdata = &rest[..end];
-            push_colored(&mut result, AppTheme::SYNTAX_KEYWORD, "<![CDATA[");
+            push_colored(&mut result, palette.syntax_keyword, "<![CDATA[");
 
-            let content_end = cdata.len().saturating_sub(3);
+            // Only a real closing delimiter trims 3 bytes; an unterminated
+            // section keeps every character visible.
+            let content_end = if cdata.ends_with("]]>") {
+                cdata.len() - 3
+            } else {
+                cdata.len()
+            };
             if content_end > 9 {
                 push_entity_aware(
                     &mut result,
                     &cdata[9..content_end],
-                    AppTheme::SYNTAX_TEXT,
-                    AppTheme::SYNTAX_KEYWORD,
+                    palette.syntax_text,
+                    palette.syntax_keyword,
                 );
             }
 
             if cdata.ends_with("]]>") {
-                push_colored(&mut result, AppTheme::SYNTAX_KEYWORD, "]]>");
+                push_colored(&mut result, palette.syntax_keyword, "]]>");
             }
             index += end;
             continue;
@@ -98,21 +134,21 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
 
         if rest.starts_with("<?") {
             let end = find_processing_instruction_end(rest);
-            highlight_processing_instruction(&mut result, &rest[..end]);
+            highlight_processing_instruction(palette, &mut result, &rest[..end]);
             index += end;
             continue;
         }
 
         if rest.starts_with("<!") {
             let end = find_tag_end(rest);
-            push_colored(&mut result, AppTheme::SYNTAX_KEYWORD, &rest[..end]);
+            push_colored(&mut result, palette.syntax_keyword, &rest[..end]);
             index += end;
             continue;
         }
 
         if rest.starts_with('<') {
             let end = find_tag_end(rest);
-            highlight_tag_like_markup(&mut result, &rest[..end]);
+            highlight_tag_like_markup(palette, &mut result, &rest[..end]);
             index += end;
             continue;
         }
@@ -121,8 +157,8 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
         push_entity_aware(
             &mut result,
             &rest[..next_markup],
-            AppTheme::SYNTAX_TEXT,
-            AppTheme::SYNTAX_KEYWORD,
+            palette.syntax_text,
+            palette.syntax_keyword,
         );
         index += next_markup;
     }
@@ -130,22 +166,27 @@ fn tokenize_xml(text: &str) -> Vec<(Color32, String)> {
     result
 }
 
-fn highlight_tag_like_markup(result: &mut Vec<(Color32, String)>, markup: &str) {
+fn highlight_tag_like_markup(palette: &Palette, result: &mut Vec<(Color32, String)>, markup: &str) {
     if let Some(markup) = markup.strip_prefix("</") {
-        push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "</");
-        highlight_markup_body(result, markup, AppTheme::SYNTAX_TAG, ">");
+        push_colored(result, palette.syntax_tag_bracket, "</");
+        highlight_markup_body(palette, result, markup, palette.syntax_tag, ">");
     } else {
-        push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "<");
-        highlight_markup_body(result, &markup[1..], AppTheme::SYNTAX_TAG, ">");
+        push_colored(result, palette.syntax_tag_bracket, "<");
+        highlight_markup_body(palette, result, &markup[1..], palette.syntax_tag, ">");
     }
 }
 
-fn highlight_processing_instruction(result: &mut Vec<(Color32, String)>, markup: &str) {
-    push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "<?");
-    highlight_markup_body(result, &markup[2..], AppTheme::SYNTAX_KEYWORD, "?>");
+fn highlight_processing_instruction(
+    palette: &Palette,
+    result: &mut Vec<(Color32, String)>,
+    markup: &str,
+) {
+    push_colored(result, palette.syntax_tag_bracket, "<?");
+    highlight_markup_body(palette, result, &markup[2..], palette.syntax_keyword, "?>");
 }
 
 fn highlight_markup_body(
+    palette: &Palette,
     result: &mut Vec<(Color32, String)>,
     markup_body: &str,
     name_color: Color32,
@@ -168,7 +209,7 @@ fn highlight_markup_body(
         }
 
         if rest.starts_with('/') && closing_delimiter == ">" {
-            push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "/");
+            push_colored(result, palette.syntax_tag_bracket, "/");
             index += 1;
             continue;
         }
@@ -176,13 +217,13 @@ fn highlight_markup_body(
         let ch = rest.chars().next().expect("non-empty string");
         if ch.is_whitespace() {
             let ws_len = leading_whitespace_len(rest);
-            push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, &rest[..ws_len]);
+            push_colored(result, palette.syntax_tag_bracket, &rest[..ws_len]);
             index += ws_len;
             continue;
         }
 
         if ch == '=' {
-            push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, "=");
+            push_colored(result, palette.syntax_tag_bracket, "=");
             index += ch.len_utf8();
             continue;
         }
@@ -192,8 +233,8 @@ fn highlight_markup_body(
             push_entity_aware(
                 result,
                 &rest[..quoted_len],
-                AppTheme::SYNTAX_ATTR_VALUE,
-                AppTheme::SYNTAX_KEYWORD,
+                palette.syntax_attr_value,
+                palette.syntax_keyword,
             );
             index += quoted_len;
             continue;
@@ -202,7 +243,7 @@ fn highlight_markup_body(
         let name_len = xml_name_len(rest);
         if name_len > 0 {
             let color = if consumed_name {
-                AppTheme::SYNTAX_ATTR_NAME
+                palette.syntax_attr_name
             } else {
                 consumed_name = true;
                 name_color
@@ -212,12 +253,12 @@ fn highlight_markup_body(
             continue;
         }
 
-        push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, &rest[..ch.len_utf8()]);
+        push_colored(result, palette.syntax_tag_bracket, &rest[..ch.len_utf8()]);
         index += ch.len_utf8();
     }
 
     if markup_body.len() > closing_start {
-        push_colored(result, AppTheme::SYNTAX_TAG_BRACKET, closing_delimiter);
+        push_colored(result, palette.syntax_tag_bracket, closing_delimiter);
     }
 }
 
@@ -362,6 +403,13 @@ fn is_xml_name_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::Theme as AppTheme;
+
+    fn mocha() -> Palette {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        Palette::resolve(&ctx)
+    }
 
     fn has_segment(tokens: &[(Color32, String)], color: Color32, fragment: &str) -> bool {
         tokens
@@ -372,45 +420,65 @@ mod tests {
     #[test]
     fn test_highlight_simple_xml() {
         let highlighter = SyntaxHighlighter::new();
+        let palette = mocha();
         let xml = r#"<root attr="value">text</root>"#;
-        let result = highlighter.highlight_xml(xml);
+        let result = highlighter.highlight_xml(&palette, xml);
 
-        assert!(has_segment(&result, AppTheme::SYNTAX_TAG, "root"));
-        assert!(has_segment(&result, AppTheme::SYNTAX_ATTR_NAME, "attr"));
-        assert!(has_segment(
-            &result,
-            AppTheme::SYNTAX_ATTR_VALUE,
-            "\"value\""
-        ));
-        assert!(has_segment(&result, AppTheme::SYNTAX_TEXT, "text"));
+        assert!(has_segment(&result, palette.syntax_tag, "root"));
+        assert!(has_segment(&result, palette.syntax_attr_name, "attr"));
+        assert!(has_segment(&result, palette.syntax_attr_value, "\"value\""));
+        assert!(has_segment(&result, palette.syntax_text, "text"));
     }
 
     #[test]
     fn test_highlight_special_xml_constructs() {
         let highlighter = SyntaxHighlighter::new();
+        let palette = mocha();
         let xml = r#"<!-- note --><![CDATA[<raw>]]><?xml-stylesheet href="style.xsl"?>&amp;"#;
-        let result = highlighter.highlight_xml(xml);
+        let result = highlighter.highlight_xml(&palette, xml);
 
         assert!(has_segment(
             &result,
-            AppTheme::SYNTAX_COMMENT,
+            palette.syntax_comment,
             "<!-- note -->"
         ));
-        assert!(has_segment(&result, AppTheme::SYNTAX_KEYWORD, "<![CDATA["));
-        assert!(has_segment(&result, AppTheme::SYNTAX_TEXT, "<raw>"));
+        assert!(has_segment(&result, palette.syntax_keyword, "<![CDATA["));
+        assert!(has_segment(&result, palette.syntax_text, "<raw>"));
         assert!(has_segment(
             &result,
-            AppTheme::SYNTAX_KEYWORD,
+            palette.syntax_keyword,
             "xml-stylesheet"
         ));
-        assert!(has_segment(&result, AppTheme::SYNTAX_KEYWORD, "&amp;"));
+        assert!(has_segment(&result, palette.syntax_keyword, "&amp;"));
     }
 
     #[test]
     fn test_highlight_lines_preserves_line_count() {
         let highlighter = SyntaxHighlighter::new();
+        let palette = mocha();
         let xml = "<root>\n  <child>text</child>\n</root>";
-        let result = highlighter.highlight_xml_lines(xml);
+        let result = highlighter.highlight_xml_lines(&palette, xml);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn unterminated_cdata_keeps_every_character() {
+        let highlighter = SyntaxHighlighter::new();
+        let palette = mocha();
+        let xml = "<root><![CDATA[unterminated";
+        let result = highlighter.highlight_xml(&palette, xml);
+        let rendered: String = result.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(rendered, xml, "highlighting must not drop characters");
+    }
+
+    #[test]
+    fn dark_palette_matches_the_legacy_mocha_tokens() {
+        // The legacy `Theme` constants documented Mocha; the resolved dark
+        // palette must keep the same accents where the names overlap.
+        let palette = mocha();
+        assert_eq!(palette.syntax_tag, AppTheme::SYNTAX_TAG);
+        assert_eq!(palette.syntax_attr_name, AppTheme::SYNTAX_ATTR_NAME);
+        assert_eq!(palette.syntax_attr_value, AppTheme::SYNTAX_ATTR_VALUE);
+        assert_eq!(palette.syntax_keyword, AppTheme::SYNTAX_KEYWORD);
     }
 }

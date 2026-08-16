@@ -9,9 +9,8 @@ use egui::{Context, RichText, Ui, Window};
 use crate::core::Command;
 use crate::fluent_args;
 use crate::ui::icons::Icons;
-use crate::ui::panels::save_all_dirty;
 use crate::ui::shell::{AppShell, Dialog};
-use crate::ui::theme::Theme;
+use crate::ui::theme::Palette;
 
 // ---------------------------------------------------------------------------
 // Dialogs (modal windows)
@@ -27,6 +26,7 @@ pub fn dialogs(ctx: &Context, shell: &mut AppShell) {
     Window::new(shell.localization.msg(title))
         .collapsible(false)
         .resizable(false)
+        .default_width(340.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             dialog_body(ui, shell, &mut dialog, &mut keep);
@@ -106,13 +106,18 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
         }
         Dialog::XPathQuery { expression } => {
             let mut buffer = expression.clone();
-            ui.add(egui::TextEdit::singleline(&mut buffer).hint_text("//element[@attr='value']"));
+            ui.add(
+                egui::TextEdit::singleline(&mut buffer)
+                    .hint_text("//element[@attr='value']")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("XPath").clicked() {
+                if ui.button(shell.localization.msg("dialog-run")).clicked() {
                     shell.execute_xpath(&buffer);
                     *keep = false;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(shell.localization.msg("dialog-cancel")).clicked() {
                     *keep = false;
                 }
             });
@@ -140,7 +145,7 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                             Icons::TRASH,
                             shell.localization.msg("dialog-confirm")
                         ))
-                        .color(Theme::ERROR),
+                        .color(Palette::resolve(ui.ctx()).error),
                     )
                     .clicked()
                 {
@@ -167,17 +172,42 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .button(shell.localization.msg("dialog-unsaved-save-selected"))
                     .clicked()
                 {
-                    save_all_dirty(shell);
+                    // Synchronous: background jobs would not finish before
+                    // the window closes.
+                    let failures = shell.save_dirty_sessions_sync();
+                    if failures == 0 {
+                        match shell.after_unsaved.take() {
+                            Some(crate::ui::shell::AfterUnsaved::Exit) => {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            _ => shell.close_active_tab(),
+                        }
+                    }
                     *keep = false;
                 }
                 if ui
                     .button(shell.localization.msg("dialog-unsaved-discard-selected"))
                     .clicked()
                 {
-                    for index in 0..shell.workspace.sessions().len() {
-                        shell.workspace.select(index);
-                        if let Some(session) = shell.workspace.active_mut() {
-                            session.history.clear();
+                    match shell.after_unsaved.take() {
+                        Some(crate::ui::shell::AfterUnsaved::CloseTab) => {
+                            // Discard only the tab being closed (including
+                            // any un-applied source draft).
+                            if let Some(session) = shell.workspace.active_mut() {
+                                session.history.clear();
+                                session.source_draft = None;
+                            }
+                            shell.close_active_tab();
+                        }
+                        _ => {
+                            for index in 0..shell.workspace.sessions().len() {
+                                shell.workspace.select(index);
+                                if let Some(session) = shell.workspace.active_mut() {
+                                    session.history.clear();
+                                    session.source_draft = None;
+                                }
+                            }
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     }
                     *keep = false;
@@ -186,6 +216,7 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .button(shell.localization.msg("dialog-unsaved-cancel"))
                     .clicked()
                 {
+                    shell.after_unsaved = None;
                     *keep = false;
                 }
             });

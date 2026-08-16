@@ -2,9 +2,15 @@ use eframe::egui;
 use xml_tool::XmlToolApp;
 
 fn main() -> eframe::Result<()> {
-    // Log to stderr for debugging
+    // Log to stderr for debugging. `sctk_adwaita` (Wayland window
+    // decorations) spams a harmless "unknown button type" warning on
+    // desktops whose decoration layout it does not fully parse — keep it
+    // at error level so real warnings stay visible.
     #[cfg(debug_assertions)]
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,sctk_adwaita=error"),
+    )
+    .init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
