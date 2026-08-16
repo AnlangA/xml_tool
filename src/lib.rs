@@ -15,6 +15,7 @@ pub mod core;
 pub mod exi;
 pub mod export;
 pub mod fixtures;
+pub mod services;
 pub mod ui;
 pub mod utils;
 pub mod xml;
