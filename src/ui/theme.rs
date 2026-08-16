@@ -30,7 +30,7 @@ impl Theme {
     pub const YELLOW: Color32 = Color32::from_rgb(249, 226, 175);
     pub const GREEN: Color32 = Color32::from_rgb(166, 227, 161);
     pub const TEAL: Color32 = Color32::from_rgb(148, 226, 213);
-    pub const SKY: Color32 = Color32::from_rgb(137, 180, 250);
+    pub const SKY: Color32 = Color32::from_rgb(137, 220, 235);
     pub const SAPPHIRE: Color32 = Color32::from_rgb(116, 199, 232);
     pub const BLUE: Color32 = Color32::from_rgb(137, 180, 250);
     pub const LAVENDER: Color32 = Color32::from_rgb(180, 190, 254);

@@ -491,7 +491,8 @@ impl XmlDocument {
         self.ranges.clear();
         self.qname_index.clear();
         let engine = self.engine.document();
-        for id in self.collect_attached(engine) {
+        let attached = self.collect_attached(engine);
+        for &id in &attached {
             if let Some(range) = engine.node_range(EngineNodeId::new(id as usize)) {
                 self.ranges.insert(id, (range.start, range.end));
             }
@@ -500,7 +501,7 @@ impl XmlDocument {
                 self.qname_index.entry(rendered).or_default().push(id);
             }
         }
-        self.doc_order = self.collect_attached(engine);
+        self.doc_order = attached;
         self.doc_order_valid = true;
     }
 

@@ -1,20 +1,21 @@
 //! The source-editor draft workflow.
 //!
-//! Typing in the source pane edits a [`SourceDraft`] — a rope buffer plus
-//! the document revision it was forked from. While a draft exists the tree
+//! Typing in the source pane edits a [`SourceDraft`] — a plain text buffer
+//! plus the document revision it was forked from. (The buffer used to be a
+//! rope, but egui's `TextEdit` needs a contiguous `String` anyway, so the
+//! rope only added an O(n) rebuild per keystroke.) While a draft exists the tree
 //! is read-only (both panes must never hold divergent truths). Applying
 //! parses the draft off-thread; success commits one atomic
 //! `ReplaceWholeSource` command (a single undo step), failure keeps the
 //! draft and reports a diagnostic with an exact 1-based line/column.
 
 use crate::core::Revision;
-use crate::services::source_buffer::SourceBuffer;
 
 /// An in-progress source edit.
 #[derive(Clone)]
 pub struct SourceDraft {
     /// The edited text.
-    pub buffer: SourceBuffer,
+    pub buffer: String,
     /// Revision of the document this draft was forked from; applying is
     /// only meaningful while the document still sits at it.
     pub base_revision: Revision,
@@ -24,14 +25,14 @@ impl SourceDraft {
     /// Forks a draft from the current source.
     pub fn fork(source: &str, revision: Revision) -> SourceDraft {
         SourceDraft {
-            buffer: SourceBuffer::new(source),
+            buffer: source.to_owned(),
             base_revision: revision,
         }
     }
 
     /// Whether the draft still differs from its fork point.
     pub fn is_modified(&self, current_source: &str) -> bool {
-        self.buffer.text() != current_source
+        self.buffer != current_source
     }
 }
 
@@ -90,9 +91,9 @@ mod tests {
         let draft = SourceDraft::fork("<r/>", Revision(3));
         assert!(!draft.is_modified("<r/>"));
         let mut draft = draft;
-        draft.buffer.insert(3, "x");
+        draft.buffer.insert(3, 'x');
         assert!(draft.is_modified("<r/>"));
-        assert_eq!(draft.buffer.text(), "<r/x>");
+        assert_eq!(draft.buffer, "<r/x>");
     }
 
     #[test]

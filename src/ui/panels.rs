@@ -15,8 +15,7 @@ use egui::{
 use crate::core::Command;
 use crate::core::document::{NodeId, XmlNodeKind};
 use crate::fluent_args;
-use crate::services::outline::FlatTree;
-use crate::services::search::{SearchHit, SearchIndex};
+use crate::services::search::SearchHit;
 use crate::services::workspace::DocumentMode;
 use crate::ui::icons::Icons;
 pub use crate::ui::inspector::{inspector_contents, inspector_panel};
@@ -36,23 +35,18 @@ const OUTLINE_ARROW_WIDTH: f32 = 18.0;
 /// huge documents stay responsive.
 const HIGHLIGHT_CHAR_LIMIT: usize = 200_000;
 
-/// Cached flattened outline plus element count for the status bar.
-pub struct OutlineCache {
-    pub tree: FlatTree,
-    pub elements: usize,
-}
-
 /// Search box state for the active session.
 #[derive(Default)]
 pub struct SearchState {
     pub open: bool,
     pub needle: String,
     pub case_sensitive: bool,
-    pub index: Option<(u64, u64, SearchIndex)>, // (session, revision, index)
     pub hits: Vec<SearchHit>,
     pub current: usize,
     /// Session the hits belong to; switching tabs invalidates them.
     pub session: Option<crate::services::task_manager::SessionId>,
+    /// Set when the box is (re)opened: the field grabs keyboard focus.
+    pub focus_pending: bool,
 }
 
 impl SearchState {
@@ -112,11 +106,23 @@ fn toolbar_button_enabled(
     tooltip: String,
     enabled: bool,
 ) -> egui::Response {
+    toolbar_button_full(ui, icon, tooltip, enabled, false)
+}
+
+/// Full form: enabled flag plus a selected (toggled-on) highlight.
+fn toolbar_button_full(
+    ui: &mut Ui,
+    icon: &str,
+    tooltip: String,
+    enabled: bool,
+    selected: bool,
+) -> egui::Response {
     ui.add_enabled(
         enabled,
         egui::Button::new(RichText::new(icon).size(Typography::HEADING_3))
             .min_size(vec2(28.0, 24.0))
-            .frame_when_inactive(false),
+            .frame_when_inactive(false)
+            .selected(selected),
     )
     .on_hover_text(tooltip)
 }
@@ -186,10 +192,7 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
             }
         });
         ui.menu_button(shell.localization.msg("menu-edit"), |ui| {
-            let undo_enabled = shell
-                .workspace
-                .active()
-                .is_some_and(|session| session.history.undo_depth() > 0);
+            let undo_enabled = shell.can_undo();
             if ui
                 .add_enabled(
                     undo_enabled,
@@ -199,10 +202,7 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
             {
                 shell.undo();
             }
-            let redo_enabled = shell
-                .workspace
-                .active()
-                .is_some_and(|session| session.history.redo_depth() > 0);
+            let redo_enabled = shell.can_redo();
             if ui
                 .add_enabled(
                     redo_enabled,
@@ -216,6 +216,7 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
         ui.menu_button(shell.localization.msg("menu-search"), |ui| {
             if ui.button(shell.localization.msg("action-find")).clicked() {
                 shell.search.open = true;
+                shell.search.focus_pending = true;
                 shell.focus = FocusPane::Outline;
             }
         });
@@ -354,61 +355,41 @@ fn toolbar(ui: &mut Ui, shell: &mut AppShell) {
             });
         }
         ui.separator();
-        let undo_enabled = shell
-            .workspace
-            .active()
-            .is_some_and(|session| session.history.undo_depth() > 0);
-        if ui
-            .add_enabled(
-                undo_enabled,
-                egui::Button::new(
-                    RichText::new(Icons::ARROW_COUNTER_CLOCKWISE).size(Typography::HEADING_3),
-                )
-                .min_size(vec2(28.0, 24.0))
-                .frame_when_inactive(false),
-            )
-            .on_hover_text(with_shortcut(
-                shell.localization.msg("toolbar-undo"),
-                "Ctrl+Z",
-            ))
-            .clicked()
+        let undo_enabled = shell.can_undo();
+        if toolbar_button_enabled(
+            ui,
+            Icons::ARROW_COUNTER_CLOCKWISE,
+            with_shortcut(shell.localization.msg("toolbar-undo"), "Ctrl+Z"),
+            undo_enabled,
+        )
+        .clicked()
         {
             shell.undo();
         }
-        let redo_enabled = shell
-            .workspace
-            .active()
-            .is_some_and(|session| session.history.redo_depth() > 0);
-        if ui
-            .add_enabled(
-                redo_enabled,
-                egui::Button::new(
-                    RichText::new(Icons::ARROW_CLOCKWISE).size(Typography::HEADING_3),
-                )
-                .min_size(vec2(28.0, 24.0))
-                .frame_when_inactive(false),
-            )
-            .on_hover_text(with_shortcut(
-                shell.localization.msg("toolbar-redo"),
-                "Ctrl+Y",
-            ))
-            .clicked()
+        let redo_enabled = shell.can_redo();
+        if toolbar_button_enabled(
+            ui,
+            Icons::ARROW_CLOCKWISE,
+            with_shortcut(shell.localization.msg("toolbar-redo"), "Ctrl+Y"),
+            redo_enabled,
+        )
+        .clicked()
         {
             shell.redo();
         }
-        let search_button =
-            egui::Button::new(RichText::new(Icons::MAGNIFYING_GLASS).size(Typography::HEADING_3))
-                .min_size(vec2(28.0, 24.0))
-                .selected(shell.search.open);
-        if ui
-            .add_enabled(has_session, search_button)
-            .on_hover_text(with_shortcut(
-                shell.localization.msg("action-find"),
-                "Ctrl+F",
-            ))
-            .clicked()
+        if toolbar_button_full(
+            ui,
+            Icons::MAGNIFYING_GLASS,
+            with_shortcut(shell.localization.msg("action-find"), "Ctrl+F"),
+            has_session,
+            shell.search.open,
+        )
+        .clicked()
         {
             shell.search.open = !shell.search.open;
+            if shell.search.open {
+                shell.search.focus_pending = true;
+            }
         }
         ui.separator();
         let (errors, warnings, infos) = shell.alerts.counts();
@@ -528,20 +509,14 @@ pub fn document_tabs(ctx: &Context, shell: &mut AppShell) {
 // Left: outline + search
 // ---------------------------------------------------------------------------
 
-pub fn outline_panel(ctx: &Context, shell: &mut AppShell, drawer: bool) {
-    let panel = if drawer {
-        SidePanel::left("outline-drawer")
-            .resizable(false)
-            .exact_width(OUTLINE_MIN_WIDTH)
-    } else {
-        SidePanel::left("outline")
-            .resizable(true)
-            .min_width(OUTLINE_MIN_WIDTH)
-            .max_width(OUTLINE_MAX_WIDTH)
-    };
-    panel.show(ctx, |ui| {
-        outline_contents(ui, shell);
-    });
+pub fn outline_panel(ctx: &Context, shell: &mut AppShell) {
+    SidePanel::left("outline")
+        .resizable(true)
+        .min_width(OUTLINE_MIN_WIDTH)
+        .max_width(OUTLINE_MAX_WIDTH)
+        .show(ctx, |ui| {
+            outline_contents(ui, shell);
+        });
 }
 
 fn outline_contents(ui: &mut Ui, shell: &mut AppShell) {
@@ -743,11 +718,17 @@ fn search_box(ui: &mut Ui, shell: &mut AppShell) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(Icons::MAGNIFYING_GLASS).color(pal.text_muted));
         let mut needle = shell.search.needle.clone();
+        let field_id = ui.id().with("search-field");
         let response = ui.add(
             TextEdit::singleline(&mut needle)
+                .id(field_id)
                 .hint_text(shell.localization.msg("search-placeholder"))
                 .desired_width(160.0),
         );
+        if shell.search.focus_pending {
+            shell.search.focus_pending = false;
+            ui.ctx().memory_mut(|memory| memory.request_focus(field_id));
+        }
         if response.changed() {
             shell.search.needle = needle;
             shell.refresh_search();
@@ -813,11 +794,22 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
 
         let editable = session.mode == DocumentMode::Editable;
         let draft_active = session.source_draft.is_some();
-        let mut text = session
-            .source_draft
-            .as_ref()
-            .map(|draft| draft.buffer.text())
-            .unwrap_or_else(|| session.document.source().to_string());
+        // The editable path needs an owned buffer for `TextEdit`; read-only
+        // sessions view the source through `&str` with no per-frame copy.
+        let mut text = if editable {
+            session
+                .source_draft
+                .as_ref()
+                .map(|draft| draft.buffer.clone())
+                .unwrap_or_else(|| session.document.source().to_string())
+        } else {
+            String::new()
+        };
+        let source_len = if editable {
+            text.len()
+        } else {
+            session.document.source().len()
+        };
         let revision = session.document.revision();
 
         if let Some((line, column)) = shell.source_jump {
@@ -868,7 +860,10 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
         }
 
         let mut changed = false;
-        let highlight = text.len() <= HIGHLIGHT_CHAR_LIMIT;
+        let highlight = source_len <= HIGHLIGHT_CHAR_LIMIT;
+        // One-shot jump-to-line scroll (from the problems panel), consumed
+        // before the editor closure so `shell` stays free to borrow.
+        let scroll_to = shell.pending_scroll.take();
         let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             let font_id = egui::TextStyle::Monospace.resolve(ui.style());
             let job = if highlight {
@@ -893,17 +888,48 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let mut editor = TextEdit::multiline(&mut text)
-                    .font(egui::TextStyle::Monospace)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .lock_focus(true)
-                    .id(egui::Id::new(("source", revision.0, draft_active)));
-                if highlight {
-                    editor = editor.layouter(&mut layouter);
-                }
-                let response = ui.add_enabled(editable, editor);
+                let response = if editable {
+                    let mut editor = TextEdit::multiline(&mut text)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .lock_focus(true)
+                        .id(egui::Id::new(("source", revision.0, draft_active)));
+                    if highlight {
+                        editor = editor.layouter(&mut layouter);
+                    }
+                    ui.add(editor)
+                } else {
+                    // Re-borrow inside the closure so the banners above
+                    // could take `shell` mutably.
+                    let mut source = shell
+                        .workspace
+                        .active()
+                        .map(|session| session.document.source())
+                        .unwrap_or_default();
+                    let mut viewer = TextEdit::multiline(&mut source)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .id(egui::Id::new(("source", revision.0, draft_active)));
+                    if highlight {
+                        viewer = viewer.layouter(&mut layouter);
+                    }
+                    ui.add_enabled(false, viewer)
+                };
                 changed = response.changed();
+                if let Some((line, _column)) = scroll_to {
+                    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+                    let top = row_height * (line.saturating_sub(1)) as f32;
+                    ui.scroll_to_rect(
+                        egui::Rect::from_min_size(
+                            egui::pos2(0.0, top),
+                            egui::vec2(1.0, row_height),
+                        ),
+                        Some(egui::Align::Center),
+                    );
+                }
             });
         if changed {
             shell.update_source_text(text);
@@ -1206,6 +1232,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
     }
     if let Some(position) = jump {
         shell.source_jump = Some(position);
+        shell.pending_scroll = Some(position);
         shell.focus = FocusPane::Source;
     }
     if collapse_requested {
@@ -1300,6 +1327,3 @@ pub fn status_bar(ctx: &Context, shell: &mut AppShell) {
             });
         });
 }
-
-#[allow(dead_code)]
-fn unused_status_body(_ui: &mut Ui, _shell: &mut AppShell) {}

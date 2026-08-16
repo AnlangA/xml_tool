@@ -15,19 +15,13 @@ use crate::ui::theme::Palette;
 // Right: inspector
 // ---------------------------------------------------------------------------
 
-pub fn inspector_panel(ctx: &Context, shell: &mut AppShell, drawer: bool) {
-    let panel = if drawer {
-        SidePanel::right("inspector-drawer")
-            .resizable(false)
-            .exact_width(INSPECTOR_WIDTH)
-    } else {
-        SidePanel::right("inspector")
-            .resizable(false)
-            .exact_width(INSPECTOR_WIDTH)
-    };
-    panel.show(ctx, |ui| {
-        inspector_contents(ui, shell);
-    });
+pub fn inspector_panel(ctx: &Context, shell: &mut AppShell) {
+    SidePanel::right("inspector")
+        .resizable(false)
+        .exact_width(INSPECTOR_WIDTH)
+        .show(ctx, |ui| {
+            inspector_contents(ui, shell);
+        });
 }
 
 pub fn inspector_contents(ui: &mut Ui, shell: &mut AppShell) {
@@ -77,9 +71,8 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
             Some(XmlNodeKind::Element) => {
                 section_label(ui, shell.localization.msg("inspector-qname"));
                 let current = document.qname(node).map(|q| q.render()).unwrap_or_default();
-                let mut value = current.clone();
-                ui.add(TextEdit::singleline(&mut value).desired_width(f32::INFINITY));
-                if value != current {
+                // Commits on Enter / focus loss, not per keystroke.
+                if let Some(value) = inspector_text_edit(ui, node, "rename", &current, false) {
                     rename_to = Some(value);
                 }
 
@@ -93,25 +86,20 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
 
                 ui.separator();
                 section_label(ui, shell.localization.msg("inspector-attributes"));
-                let mut next_attr_name = 1;
                 for (name, attr_value) in document.attributes(node) {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&name).monospace().color(pal.attribute_key));
-                        let mut editable_value = attr_value.clone();
-                        let response = ui.add(
-                            TextEdit::singleline(&mut editable_value)
-                                .desired_width((INSPECTOR_WIDTH - 150.0).max(80.0)),
-                        );
-                        if response.changed() && editable_value != attr_value {
-                            set_attr = Some((name.clone(), editable_value));
+                        let field = format!("attr:{name}");
+                        if let Some(value) =
+                            inspector_text_edit(ui, node, &field, &attr_value, false)
+                        {
+                            set_attr = Some((name.clone(), value));
                         }
                         if ui.small_button("×").clicked() {
                             shell.pending_remove_attr = Some(name);
                         }
                     });
-                    next_attr_name += 1;
                 }
-                let _ = next_attr_name;
                 if ui
                     .small_button(shell.localization.msg("inspector-add-attribute"))
                     .clicked()
@@ -170,26 +158,14 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
                     },
                 );
                 let current = document.node_text(node).unwrap_or_default().to_string();
-                let mut value = current.clone();
-                let response = ui.add(
-                    TextEdit::multiline(&mut value)
-                        .desired_rows(4)
-                        .desired_width(f32::INFINITY),
-                );
-                if response.lost_focus() && value != current {
+                if let Some(value) = inspector_text_edit(ui, node, "content", &current, true) {
                     set_text = Some(value);
                 }
             }
             Some(XmlNodeKind::Comment) => {
                 section_label(ui, shell.localization.msg("inspector-comment"));
                 let current = document.comment_text(node).unwrap_or_default().to_string();
-                let mut value = current.clone();
-                let response = ui.add(
-                    TextEdit::multiline(&mut value)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
-                if response.lost_focus() && value != current {
+                if let Some(value) = inspector_text_edit(ui, node, "comment", &current, true) {
                     set_text = Some(value);
                 }
             }
@@ -277,6 +253,38 @@ fn count_descendants(document: &crate::core::document::XmlDocument, node: NodeId
         .into_iter()
         .map(|child| 1 + count_descendants(document, child))
         .sum()
+}
+
+/// Inspector text field with a persistent buffer: the in-progress text
+/// lives in egui temp memory keyed by (node, field), so typing survives
+/// re-renders, and the value commits only on Enter / focus loss. Returns
+/// the committed value, if any.
+fn inspector_text_edit(
+    ui: &mut Ui,
+    node: NodeId,
+    field: &str,
+    current: &str,
+    multiline: bool,
+) -> Option<String> {
+    let id = ui.id().with(("inspector-edit", field, node.0));
+    let mut value = ui
+        .data_mut(|data| data.get_temp::<String>(id))
+        .unwrap_or_else(|| current.to_owned());
+    let response = if multiline {
+        ui.add(
+            TextEdit::multiline(&mut value)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        )
+    } else {
+        ui.add(TextEdit::singleline(&mut value).desired_width(f32::INFINITY))
+    };
+    if response.lost_focus() && value != current {
+        ui.data_mut(|data| data.remove::<String>(id));
+        return Some(value);
+    }
+    ui.data_mut(|data| data.insert_temp(id, value));
+    None
 }
 
 fn unique_attribute_name(shell: &AppShell, element: NodeId) -> String {

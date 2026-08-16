@@ -116,21 +116,17 @@ impl ReadOnlyDocument {
         if fold {
             let haystack = self.source.to_lowercase();
             let needle = needle.to_lowercase();
-            let mut from = 0;
-            while let Some(found) = haystack[from..].find(&needle) {
-                let start = from + found;
-                // to_lowercase can change byte lengths; map through char
-                // boundaries by re-finding in the original via the folded
-                // haystack only when lengths match (ASCII fast path), else
-                // fall back to a char-wise scan.
-                if haystack.len() == self.source.len() {
+            if haystack.len() == self.source.len() {
+                // Length-preserving fold (ASCII): offsets line up directly.
+                let mut from = 0;
+                while let Some(found) = haystack[from..].find(&needle) {
+                    let start = from + found;
                     matches.push(start..start + needle.len());
                     from = start + needle.len();
-                } else {
-                    break;
                 }
-            }
-            if haystack.len() != self.source.len() {
+            } else {
+                // Unicode folding changed byte lengths: scan with an
+                // explicit folded→source offset map.
                 matches = fold_scan(&self.source, &needle);
             }
         } else {
@@ -218,19 +214,43 @@ fn render_name(name: &EngineQName<'_>) -> String {
 
 /// Char-wise case-insensitive scan for non-ASCII sources.
 fn fold_scan(source: &str, needle: &str) -> Vec<Range<usize>> {
-    let haystack = source.to_lowercase();
+    // Fold char by char, remembering for every folded byte offset the
+    // source byte offset it came from — Unicode case folding can change
+    // byte lengths (e.g. 'İ'), so offsets cannot be reused directly.
+    let mut folded = String::with_capacity(source.len());
+    let mut map: Vec<u32> = Vec::with_capacity(source.len() + 1);
+    for (src_index, ch) in source.char_indices() {
+        let folded_start = folded.len();
+        folded.extend(ch.to_lowercase());
+        map.resize(map.len() + (folded.len() - folded_start), src_index as u32);
+    }
+    map.push(source.len() as u32);
+
     let mut matches = Vec::new();
     let mut from = 0;
-    while let Some(found) = haystack[from..].find(needle) {
+    while let Some(found) = folded[from..].find(needle) {
         let start = from + found;
-        matches.push(start..start + needle.len());
-        from = start + needle.len();
+        let end = start + needle.len();
+        matches.push(map[start] as usize..map[end] as usize);
+        from = end;
     }
-    // The folded haystack may differ in length from the source; convert
-    // offsets back by walking chars (adequate for the rare non-ASCII case).
-    if haystack.len() == source.len() {
-        matches
-    } else {
-        Vec::new() // offsets unreliable; caller re-searches case-sensitively
+    matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_insensitive_search_maps_offsets_for_non_ascii_sources() {
+        // 'İ' folds to two chars ("i\u{307}"), shifting every later byte:
+        // folded offsets cannot index the source. The map must fix them up.
+        let doc = ReadOnlyDocument::open("<r>İSTANBUL x Value-1</r>".as_bytes()).expect("parse");
+        let hits = doc.search_literal("value-1", true);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&doc.source[hits[0].clone()], "Value-1");
+        let hits = doc.search_literal("i̇stanbul", true);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&doc.source[hits[0].clone()], "İSTANBUL");
     }
 }

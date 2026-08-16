@@ -35,6 +35,28 @@
 - Closing a tab frees its caches; background-job bookkeeping no longer
   grows unbounded; concurrent saves of one file use unique temp names.
 
+### Fixes (round 2)
+- Inspector fields (rename, attributes, text/comment bodies) now commit on
+  Enter / focus loss via persistent edit buffers — no more per-keystroke
+  commits (which spammed error alerts on invalid intermediate names), and
+  multiline text editing actually keeps what you type.
+- The problems panel's jump-to-source now scrolls the target line into
+  view; Ctrl+F / F6 move keyboard focus to the search field / source
+  editor.
+- Crash-recovery snapshots are actually written (every 30 s for dirty
+  sessions) — previously the store only ever read/deleted them.
+- Case-insensitive large-file search over non-ASCII text no longer drops
+  every match (folded→source byte offsets are mapped explicitly).
+- Parse-error locations with a zero line or column no longer surface as
+  half-valid positions.
+- Read-only (large) documents render the source without a per-frame full
+  copy; the source draft is a plain `String` instead of a rope rebuilt on
+  every keystroke.
+- Legacy `Theme::SKY` constant had the wrong RGB (duplicated BLUE).
+- Document index rebuild no longer walks the DOM twice; dead code
+  (`OutlineCache`, unused search index slot, unreachable drawer branches)
+  removed; toolbar/menu undo-redo enablement unified.
+
 ### Cleanup
 - Removed the unused `egui_extras` dependency and the legacy
   `ui::xml_tree`/`cache` modules (~840 lines of dead code); the tree
