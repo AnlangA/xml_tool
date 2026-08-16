@@ -277,3 +277,67 @@ fn structural_edits_work_on_large_editable_documents() {
         Some("inserted at scale")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step 9: unified session cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_cache_hits_and_invalidates_by_revision() {
+    use xml_tool::services::session_cache::{DocumentSessionCache, expansion_digest};
+    use xml_tool::services::task_manager::SessionId;
+
+    let mut doc = XmlDocument::parse(b"<r><a>alpha</a></r>".as_slice()).unwrap();
+    let session = SessionId(1);
+    let mut cache = DocumentSessionCache::new(8 * 1024 * 1024);
+
+    let order = doc.document_order().to_vec();
+    let first = cache.search_index(session, 0, &doc);
+    let hits_first = first.search("alpha", true, &order).len();
+    assert_eq!(hits_first, 1);
+    assert_eq!(cache.search_stats().misses, 1);
+
+    let second = cache.search_index(session, 0, &doc);
+    let hits_second = second.search("alpha", true, &order).len();
+    assert_eq!(hits_second, 1, "memoized query still works");
+    assert_eq!(cache.search_stats().hits, 1, "second lookup is a hit");
+
+    // An edit bumps the revision: the next lookup must rebuild.
+    let mut history = xml_tool::core::History::new();
+    let text = doc.children(doc.children(doc.root_element().unwrap())[0])[0];
+    history
+        .commit(
+            &mut doc,
+            Command::SetNodeContent {
+                node: text,
+                content: xml_tool::core::NodeContent::Text("beta".into()),
+            },
+        )
+        .unwrap();
+    cache.invalidate_revisions(session, doc.revision().0);
+    let order = doc.document_order().to_vec();
+    let rebuilt = cache.search_index(session, doc.revision().0, &doc);
+    assert_eq!(rebuilt.search("beta", true, &order).len(), 1);
+    assert_eq!(cache.search_stats().misses, 2, "revision change rebuilds");
+    assert!(cache.within_budget());
+
+    // Expansion digest: different sets produce different keys.
+    let a = std::collections::HashSet::from([xml_tool::core::NodeId(1)]);
+    let b = std::collections::HashSet::from([xml_tool::core::NodeId(2)]);
+    assert_ne!(expansion_digest(&a), expansion_digest(&b));
+}
+
+#[test]
+fn session_cache_evicts_over_budget() {
+    use xml_tool::services::session_cache::DocumentSessionCache;
+    use xml_tool::services::task_manager::SessionId;
+
+    let mut cache = DocumentSessionCache::new(1); // impossibly small
+    let doc = XmlDocument::parse(b"<r><a>text</a></r>".as_slice()).unwrap();
+    cache.search_index(SessionId(1), 0, &doc);
+    assert!(
+        cache.bytes() <= 1 || cache.searches_is_empty(),
+        "budget must evict: {} bytes held",
+        cache.bytes()
+    );
+}

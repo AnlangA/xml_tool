@@ -10,11 +10,13 @@
 pub mod diff;
 pub mod document_io;
 pub mod exi_workbench;
+pub mod frame_observer;
 pub mod large_file;
 pub mod outline;
 pub mod recovery;
 pub mod replace;
 pub mod search;
+pub mod session_cache;
 pub mod source_buffer;
 pub mod source_editor;
 pub mod task_manager;

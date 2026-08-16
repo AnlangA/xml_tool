@@ -19,7 +19,6 @@ use crate::core::{Command, Diagnostic, Severity};
 use crate::fluent_args;
 use crate::services::document_io::{classify_bytes, save_bytes_atomically};
 use crate::services::recovery::{RecoverySnapshot, RecoveryStore};
-use crate::services::search::SearchIndex;
 use crate::services::task_manager::{SessionId, TaskManager};
 use crate::services::watcher::FileWatcher;
 use crate::services::workspace::{DocumentMode, FileType, WorkspaceState};
@@ -91,7 +90,10 @@ pub struct AppShell {
     pub(crate) pending_new_attr: bool,
     pub(crate) pending_remove_attr: Option<String>,
     pub(crate) open_pending: usize,
-    pub(crate) outline_cache: Option<(SessionId, u64, panels::OutlineCache)>,
+    /// Unified document caches (search index, outline) with hit stats.
+    pub cache: crate::services::session_cache::DocumentSessionCache,
+    /// Frame section timings.
+    pub frames: crate::services::frame_observer::FrameObserver,
     /// Fonts are installed once per context, not per frame.
     fonts_installed: bool,
     /// Narrow-layout drawers (default open so panels stay reachable).
@@ -114,42 +116,37 @@ impl AppShell {
             dialog: None,
             focus: FocusPane::Outline,
             problems: Vec::new(),
-            outline_cache: None,
             search: panels::SearchState::default(),
             pending_new_attr: false,
             pending_remove_attr: None,
             open_pending: 0,
+            cache: crate::services::session_cache::DocumentSessionCache::default(),
+            frames: crate::services::frame_observer::FrameObserver::default(),
             fonts_installed: false,
             show_outline_drawer: true,
             show_inspector_drawer: true,
         }
     }
 
-    /// Rebuilds the search index for the active session and re-runs the
-    /// current query (called after every keystroke or edit).
+    /// Re-runs the current query through the unified cache (the index is
+    /// built on miss and reused on hit).
     pub(crate) fn refresh_search(&mut self) {
         let Some(session) = self.workspace.active() else {
             self.search.hits.clear();
             return;
         };
-        let revision = session.document.revision().0;
-        let stale = !self
-            .search
-            .index
-            .as_ref()
-            .is_some_and(|(s, r, _)| *s == session.id.0 && *r == revision);
-        if stale {
-            let index = SearchIndex::build(&session.document);
-            self.search.index = Some((session.id.0, revision, index));
-        }
         if self.search.needle.is_empty() {
             self.search.hits.clear();
             return;
         }
+        let revision = session.document.revision().0;
         let order = session.document.document_order().to_vec();
         let needle = self.search.needle.clone();
         let case = self.search.case_sensitive;
-        let index = &mut self.search.index.as_mut().expect("index was just built").2;
+        let session_id = session.id;
+        let workspace = &self.workspace;
+        let document = &workspace.active().expect("checked above").document;
+        let index = self.cache.search_index(session_id, revision, document);
         self.search.hits = index.search(&needle, case, &order);
         self.search.current = 0;
     }
@@ -157,15 +154,23 @@ impl AppShell {
     /// Runs one frame.
     pub fn update(&mut self, ctx: &Context) {
         self.apply_preferences_once(ctx);
+        let started = std::time::Instant::now();
         self.poll_background_jobs();
         self.poll_file_watcher();
+        self.frames.record("background-poll", started.elapsed());
         self.handle_shortcuts(ctx);
 
+        let started = std::time::Instant::now();
         panels::top_bar(ctx, self);
+        self.frames.record("top-bar", started.elapsed());
         panels::document_tabs(ctx, self);
         panels::bottom_panel(ctx, self);
+        let started = std::time::Instant::now();
         self.layout_panels(ctx);
+        self.frames.record("panels", started.elapsed());
+        let started = std::time::Instant::now();
         panels::status_bar(ctx, self);
+        self.frames.record("status-bar", started.elapsed());
         crate::ui::dialogs::dialogs(ctx, self);
     }
 
@@ -199,7 +204,6 @@ impl AppShell {
     /// Creates a new untitled document.
     pub fn new_document(&mut self) {
         self.workspace.add_untitled();
-        self.refresh_outline_cache();
     }
 
     /// Saves the active document in a background job. The bytes saved are
@@ -261,9 +265,10 @@ impl AppShell {
         let outcome = session.history.commit(&mut session.document, command);
         match outcome {
             Ok(_changed) => {
-                // Invalidate caches for this session's new revision.
-                self.outline_cache = None;
-                self.search.index = None;
+                if let Some(session) = self.workspace.active() {
+                    self.cache
+                        .invalidate_revisions(session.id, session.document.revision().0);
+                }
                 true
             }
             Err(err) => {
@@ -277,8 +282,8 @@ impl AppShell {
     pub fn undo(&mut self) {
         if let Some(session) = self.workspace.active_mut() {
             session.history.undo(&mut session.document);
-            self.outline_cache = None;
-            self.search.index = None;
+            self.cache
+                .invalidate_revisions(session.id, session.document.revision().0);
         }
     }
 
@@ -286,8 +291,8 @@ impl AppShell {
     pub fn redo(&mut self) {
         if let Some(session) = self.workspace.active_mut() {
             session.history.redo(&mut session.document);
-            self.outline_cache = None;
-            self.search.index = None;
+            self.cache
+                .invalidate_revisions(session.id, session.document.revision().0);
         }
     }
 
@@ -321,9 +326,6 @@ impl AppShell {
         if let Some(index) = active {
             self.workspace.close(index);
         }
-        self.outline_cache = None;
-        self.search.index = None;
-        self.refresh_outline_cache();
     }
 
     pub(crate) fn push_problem(&mut self, severity: Severity, code: &str, message: String) {
@@ -357,7 +359,6 @@ impl AppShell {
                     if let Some(watcher) = self.watcher.as_mut() {
                         let _ = watcher.watch(&path);
                     }
-                    self.refresh_outline_cache();
                 }
                 OpenJobResult::Failed { code, message } => {
                     let key = match code.as_str() {
@@ -446,40 +447,27 @@ impl AppShell {
         }
     }
 
-    pub(crate) fn outline_cache(&mut self) -> &panels::OutlineCache {
-        let active = self.workspace.active_id();
-        let revision = self
-            .workspace
-            .active()
-            .map(|session| session.document.revision().0);
-        let cached = self
-            .outline_cache
-            .as_ref()
-            .is_some_and(|(session, rev, _)| Some(*session) == active && Some(*rev) == revision);
-        if !cached {
-            self.refresh_outline_cache();
-        }
-        self.outline_cache
-            .as_ref()
-            .map(|(_, _, cache)| cache)
-            .expect("cache was just refreshed")
-    }
-
-    fn refresh_outline_cache(&mut self) {
+    /// Cached outline snapshot (rows + element count) for the active
+    /// session under the current expansion state.
+    pub(crate) fn outline_snapshot(&mut self) -> (crate::services::outline::FlatTree, usize) {
         let Some(session) = self.workspace.active() else {
-            self.outline_cache = None;
-            return;
+            return (crate::services::outline::FlatTree::default(), 0);
         };
         let expanded = self.expanded.get(&session.id).cloned().unwrap_or_default();
-        let tree = crate::services::outline::FlatTree::build(&session.document, &expanded);
-        self.outline_cache = Some((
-            session.id,
-            session.document.revision().0,
-            panels::OutlineCache {
-                tree,
-                elements: session.document.document_order().len().saturating_sub(1),
-            },
-        ));
+        let expansion = crate::services::session_cache::expansion_digest(&expanded);
+        let session_id = session.id;
+        let revision = session.document.revision().0;
+        let workspace = &self.workspace;
+        let document = &workspace.active().expect("checked above").document;
+        let entry = self
+            .cache
+            .outline(session_id, revision, expansion, document, &expanded);
+        (entry.tree.clone(), entry.elements)
+    }
+
+    /// Element count for the status bar.
+    pub(crate) fn outline_elements(&mut self) -> usize {
+        self.outline_snapshot().1
     }
 
     pub(crate) fn toggle_expanded(&mut self, session: SessionId, node: NodeId) {
@@ -500,12 +488,10 @@ impl AppShell {
             .map(|&id| NodeId(id))
             .collect();
         self.expanded.insert(session, all);
-        self.refresh_outline_cache();
     }
 
     pub(crate) fn collapse_all(&mut self, session: SessionId) {
         self.expanded.insert(session, HashSet::new());
-        self.refresh_outline_cache();
     }
 
     // -----------------------------------------------------------------------
@@ -664,8 +650,8 @@ impl AppShell {
                 );
                 match result {
                     Ok(_) => {
-                        self.outline_cache = None;
-                        self.search.index = None;
+                        self.cache
+                            .invalidate_revisions(session.id, session.document.revision().0);
                     }
                     Err(err) => {
                         self.push_problem(Severity::Error, err.code, err.message.clone());

@@ -316,8 +316,6 @@ pub fn document_tabs(ctx: &Context, shell: &mut AppShell) {
             }
             if let Some(index) = select {
                 shell.workspace.select(index);
-                shell.outline_cache = None;
-                shell.search.index = None;
             }
             if let Some(index) = close {
                 shell.workspace.select(index);
@@ -380,7 +378,8 @@ fn outline_contents(ui: &mut Ui, shell: &mut AppShell) {
     }
 
     let session_id = session.id;
-    let rows = shell.outline_cache().tree.rows.clone();
+    let (rows, _) = shell.outline_snapshot();
+    let rows = rows.rows;
     let mut toggle = None;
     let mut select = None;
     let search_node = shell.search.selected_node();
@@ -671,7 +670,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
 pub fn status_bar(ctx: &Context, shell: &mut AppShell) {
     TopBottomPanel::bottom("status-bar").show(ctx, |ui| {
         let elements = if shell.workspace.active().is_some() {
-            shell.outline_cache().elements
+            shell.outline_elements()
         } else {
             0
         };

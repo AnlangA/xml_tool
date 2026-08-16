@@ -98,6 +98,16 @@ impl SearchIndex {
         self.revision
     }
 
+    /// Rough memory estimate: two strings per entry plus map overhead.
+    pub fn estimated_bytes(&self) -> usize {
+        let texts: usize = self
+            .texts
+            .values()
+            .map(|entry| entry.original.len() + entry.folded.len() + 48)
+            .sum();
+        texts + self.texts.len() * 32
+    }
+
     /// Literal search in document order. `whole_document_order` supplies
     /// the current document order (the index is a map, not a sequence).
     pub fn search(

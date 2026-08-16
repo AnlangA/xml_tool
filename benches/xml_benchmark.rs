@@ -182,4 +182,160 @@ criterion_group!(
     bench_exi_round_trip
 );
 
-criterion_main!(benches);
+// ---------------------------------------------------------------------------
+// Step 9 benchmark groups: the plan's named performance surfaces
+// ---------------------------------------------------------------------------
+
+use xml_tool::core::document::XmlDocument;
+use xml_tool::core::{Command, History};
+use xml_tool::fixtures;
+use xml_tool::services::exi_workbench::{ExiPreset, ExiSettings, encode_with_settings};
+use xml_tool::services::outline::FlatTree;
+use xml_tool::services::search::SearchIndex;
+
+fn bench_parse_20_mib(c: &mut Criterion) {
+    let bytes = fixtures::large_bytes_xml();
+    c.bench_function("parse_20_mib", |b| {
+        b.iter(|| XmlDocument::parse(black_box(bytes.as_bytes())).unwrap())
+    });
+}
+
+fn bench_serialize_20_mib(c: &mut Criterion) {
+    let bytes = fixtures::large_bytes_xml();
+    let document = XmlDocument::parse(bytes.as_bytes()).unwrap();
+    c.bench_function("serialize_20_mib", |b| {
+        b.iter(|| {
+            black_box(
+                xml_tool::xml::encoding::encode_xml_text(
+                    black_box(document.source()),
+                    xml_tool::xml::SourceEncoding::Utf8,
+                )
+                .len(),
+            )
+        })
+    });
+}
+
+fn bench_search_200k(c: &mut Criterion) {
+    let nodes = fixtures::large_nodes_xml();
+    let document = XmlDocument::parse(nodes.as_bytes()).unwrap();
+    let order = document.document_order().to_vec();
+    c.bench_function("search_200k_first", |b| {
+        b.iter_batched(
+            || SearchIndex::build(&document),
+            |mut index| black_box(index.search("id=\"123456\"", false, &order).len()),
+            BatchSize::LargeInput,
+        )
+    });
+    let mut index = SearchIndex::build(&document);
+    let mut group = c.benchmark_group("search_200k");
+    group.bench_function("cached", |b| {
+        b.iter(|| black_box(index.search("id=\"123456\"", false, &order).len()))
+    });
+    group.finish();
+}
+
+fn bench_incremental_edits(c: &mut Criterion) {
+    let mut group = c.benchmark_group("edits_20_mib");
+    group.bench_function("edit_and_undo", |b| {
+        b.iter_batched(
+            || {
+                let bytes = fixtures::large_bytes_xml();
+                let document = XmlDocument::parse(bytes.as_bytes()).unwrap();
+                let root = document.root_element().unwrap();
+                let first_record = document
+                    .children(root)
+                    .into_iter()
+                    .find(|id| document.kind(*id) == Some(xml_tool::core::XmlNodeKind::Element))
+                    .unwrap();
+                let title = document
+                    .children(first_record)
+                    .into_iter()
+                    .find(|id| document.kind(*id) == Some(xml_tool::core::XmlNodeKind::Element))
+                    .unwrap();
+                let text = document.children(title)[0];
+                (document, text)
+            },
+            |(mut document, text)| {
+                let mut history = History::new();
+                history
+                    .commit(
+                        &mut document,
+                        Command::SetNodeContent {
+                            node: text,
+                            content: xml_tool::core::NodeContent::Text("bench".into()),
+                        },
+                    )
+                    .unwrap();
+                history.undo(&mut document).unwrap();
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    group.finish();
+}
+
+fn bench_flat_tree_toggle(c: &mut Criterion) {
+    let nodes = fixtures::large_nodes_xml();
+    let document = XmlDocument::parse(nodes.as_bytes()).unwrap();
+    let root = document.root_element().unwrap();
+    let mut expanded = std::collections::HashSet::new();
+    expanded.insert(root);
+    let mut group = c.benchmark_group("flat_tree");
+    group.bench_function("build_expanded_200k", |b| {
+        b.iter(|| black_box(FlatTree::build(black_box(&document), &expanded).len()))
+    });
+    group.finish();
+}
+
+fn bench_visible_highlight(c: &mut Criterion) {
+    let bytes = fixtures::large_bytes_xml();
+    let window: String = bytes
+        .lines()
+        .skip(9_900)
+        .take(200)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let highlighter = SyntaxHighlighter::new();
+    let mut group = c.benchmark_group("highlight");
+    group.bench_function("visible_200_lines", |b| {
+        b.iter(|| black_box(highlighter.highlight_xml_lines(black_box(&window))))
+    });
+    group.finish();
+}
+
+fn bench_exi_presets(c: &mut Criterion) {
+    let sample = generate_xml(4, 5);
+    let mut group = c.benchmark_group("exi_presets");
+    for preset in [
+        ExiPreset::FidelityBitPacked,
+        ExiPreset::ByteAligned,
+        ExiPreset::PreCompression,
+        ExiPreset::MaximumCompression,
+    ] {
+        let settings = ExiSettings::preset(preset);
+        group.bench_function(format!("{preset:?}"), |b| {
+            b.iter(|| {
+                black_box(
+                    encode_with_settings(black_box(sample.as_str()), &settings)
+                        .unwrap()
+                        .0
+                        .len(),
+                )
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    step9_benches,
+    bench_parse_20_mib,
+    bench_serialize_20_mib,
+    bench_search_200k,
+    bench_incremental_edits,
+    bench_flat_tree_toggle,
+    bench_visible_highlight,
+    bench_exi_presets
+);
+criterion_main!(benches, step9_benches);
