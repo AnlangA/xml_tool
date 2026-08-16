@@ -28,7 +28,7 @@ Every feature below has automated coverage (test file in parentheses).
   results, atomic saves, crash-recovery snapshots, external-change
   detection with Reload/Keep (`tests/services_tests.rs`).
 - **Large-file mode** — over 20 MiB or 200,000 elements opens read-only
-  (browse, literal search, jump, path copy, subtree export, save-as);
+  (browse, literal search, jump, save-as);
   measured: 20 MiB open in ~93 ms, 200k-node first search ~131 ms, cached
   ~45 ns, memory within budget (`tests/large_file_tests.rs`,
   `tests/memory_budget_tests.rs`).
@@ -39,15 +39,16 @@ Every feature below has automated coverage (test file in parentheses).
 - **XPath 1.0** — namespace-aware with automatic root-visible bindings;
   node-set and typed scalar results (`tests/pro_toolkit_tests.rs`).
 - **XSD validation** — local schemas, includes/imports confined to the
-  schema's own directory tree, compiled-schema cache, positioned
-  diagnostics (`tests/pro_toolkit_tests.rs`).
+  schema's own directory tree, positioned diagnostics
+  (`tests/pro_toolkit_tests.rs`).
 - **Structural diff** — Added/Removed/Modified/Moved; formatting-only
   changes ignored; 5-second deadline (`tests/pro_toolkit_tests.rs`).
 - **Batch replace** — literal search with scope and case folding;
   whole-batch validation (any illegal replacement rejects the batch);
   1,000 hits preview → one apply → one undo (`tests/pro_toolkit_tests.rs`).
-- **JSON export** — legacy mapping plus a lossless ordered mode preserving
-  every node kind (`tests/pro_toolkit_tests.rs`).
+- **JSON export (library API)** — legacy mapping plus a lossless ordered
+  mode preserving every node kind (`src/export.rs`,
+  `tests/pro_toolkit_tests.rs`).
 - **EXI workbench** — four presets and all EXI options, pre-run conflict
   validation, fidelity warnings, full reports (bytes/ratio/timing/
   throughput/effective options/SHA-256/dropped items), malformed-stream

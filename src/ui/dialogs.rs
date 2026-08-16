@@ -106,21 +106,32 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
         }
         Dialog::XPathQuery { expression } => {
             let mut buffer = expression.clone();
-            ui.add(
+            let field_id = ui.id().with("xpath-field");
+            let response = ui.add(
                 egui::TextEdit::singleline(&mut buffer)
+                    .id(field_id)
                     .hint_text("//element[@attr='value']")
                     .desired_width(f32::INFINITY),
             );
+            // Grab focus when the dialog opens; Enter runs the query.
+            if ui.ctx().memory(|memory| memory.focused().is_none()) {
+                ui.ctx().memory_mut(|memory| memory.request_focus(field_id));
+            }
             ui.add_space(4.0);
+            let mut run =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
                 if ui.button(shell.localization.msg("dialog-run")).clicked() {
-                    shell.execute_xpath(&buffer);
-                    *keep = false;
+                    run = true;
                 }
                 if ui.button(shell.localization.msg("dialog-cancel")).clicked() {
                     *keep = false;
                 }
             });
+            if run {
+                shell.execute_xpath(&buffer);
+                *keep = false;
+            }
             *expression = buffer;
         }
         Dialog::ConfirmDelete {
@@ -182,6 +193,9 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                             }
                             _ => shell.close_active_tab(),
                         }
+                    } else {
+                        // Saving failed: stay open, drop the pending action.
+                        shell.after_unsaved = None;
                     }
                     *keep = false;
                 }
@@ -231,16 +245,20 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .button(shell.localization.msg("dialog-recovery-open"))
                     .clicked()
                 {
-                    for (_, snapshot) in snapshots.clone() {
+                    for (session_id, snapshot) in snapshots.clone() {
                         if let Ok(document) =
                             crate::core::document::XmlDocument::parse(snapshot.source.as_bytes())
                         {
-                            shell.workspace.add_opened(
-                                snapshot.path.clone().unwrap_or_default(),
-                                crate::services::workspace::FileType::Xml,
-                                crate::services::workspace::DocumentMode::Editable,
-                                document,
-                            );
+                            // Empty paths (untitled snapshots) stay untitled;
+                            // the restored session is dirty by construction.
+                            let path = snapshot
+                                .path
+                                .clone()
+                                .filter(|path| !path.as_os_str().is_empty());
+                            shell.workspace.add_restored(path, document);
+                            // Restored: the snapshot must not prompt again on
+                            // the next launch.
+                            shell.recovery.remove(session_id);
                         }
                     }
                     *keep = false;

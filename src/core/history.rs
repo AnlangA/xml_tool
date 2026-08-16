@@ -117,6 +117,14 @@ impl History {
         self.saved_cursor = Some(self.undo.len());
     }
 
+    /// Forces the dirty flag on: a crash-recovered document holds unsaved
+    /// content by definition, even before the user edits it.
+    pub fn mark_dirty(&mut self) {
+        // A cursor the undo stack can never reach keeps `is_dirty` true
+        // until the next `mark_saved`.
+        self.saved_cursor = Some(usize::MAX);
+    }
+
     /// Applies `command` and records it. Coalesces with the previous entry
     /// when both edit the same field inside the window.
     pub fn commit(

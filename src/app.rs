@@ -22,6 +22,16 @@ impl XmlToolApp {
 
 impl eframe::App for XmlToolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Intercept the window close button: with unsaved changes, cancel
+        // the close and route through the unsaved-changes dialog instead
+        // of losing edits silently.
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.shell.workspace.dirty_sessions().is_empty()
+            && !matches!(self.shell.dialog, Some(Dialog::UnsavedExit))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.shell.request_exit(ctx);
+        }
         self.shell.update(ctx);
     }
 }

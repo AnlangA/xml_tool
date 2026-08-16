@@ -51,8 +51,8 @@ impl Localization {
     /// Loads both locales with an explicit active language.
     pub fn with_language(active: Language) -> Localization {
         Localization {
-            english: build_bundle(EN_US),
-            chinese: build_bundle(ZH_CN),
+            english: build_bundle(EN_US, "en-US"),
+            chinese: build_bundle(ZH_CN, "zh-CN"),
             active,
         }
     }
@@ -124,10 +124,10 @@ impl Localization {
     }
 }
 
-fn build_bundle(source: &str) -> FluentBundle<FluentResource> {
+fn build_bundle(source: &str, lang: &str) -> FluentBundle<FluentResource> {
     let resource =
         FluentResource::try_new(source.to_string()).expect("bundled .ftl files must parse");
-    let langid: LanguageIdentifier = "en-US".parse().expect("valid langid");
+    let langid: LanguageIdentifier = lang.parse().expect("valid langid");
     let mut bundle = FluentBundle::new(vec![langid]);
     bundle
         .add_resource(resource)

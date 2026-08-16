@@ -17,17 +17,13 @@ impl Icons {
     pub const TRASH: &'static str = regular::TRASH;
     pub const MAGNIFYING_GLASS: &'static str = regular::MAGNIFYING_GLASS;
     pub const ARROW_CLOCKWISE: &'static str = regular::ARROW_CLOCKWISE;
-    pub const GEAR: &'static str = regular::GEAR;
     pub const INFO: &'static str = regular::INFO;
     pub const WARNING: &'static str = regular::WARNING;
     pub const CHECK: &'static str = regular::CHECK;
     pub const X: &'static str = regular::X;
-    pub const SEARCH: &'static str = regular::MAGNIFYING_GLASS;
     pub const ARROW_COUNTER_CLOCKWISE: &'static str = regular::ARROW_COUNTER_CLOCKWISE;
-    pub const CLOSE: &'static str = regular::X;
     pub const TREE_STRUCTURE: &'static str = regular::TREE_STRUCTURE;
     pub const SLIDERS_HORIZONTAL: &'static str = regular::SLIDERS_HORIZONTAL;
-    pub const CARET_RIGHT: &'static str = regular::CARET_RIGHT;
     pub const CARET_DOWN: &'static str = regular::CARET_DOWN;
 }
 

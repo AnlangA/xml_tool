@@ -35,6 +35,10 @@ const SAVE_SESSION: SessionId = SessionId(u64::MAX - 1);
 const APPLY_SESSION: SessionId = SessionId(u64::MAX - 2);
 /// Pseudo-session for native file-dialog picks (run off the UI thread).
 const DIALOG_SESSION: SessionId = SessionId(u64::MAX - 3);
+/// Pseudo-session for file-reload jobs (watcher banner "Reload").
+const RELOAD_SESSION: SessionId = SessionId(u64::MAX - 4);
+/// Pseudo-session for heavy tool jobs (XPath/XSD/diff/EXI encode).
+const TOOLS_SESSION: SessionId = SessionId(u64::MAX - 5);
 
 /// Modal dialogs the shell can show.
 pub enum Dialog {
@@ -64,7 +68,11 @@ pub enum Dialog {
 /// without a modal stealing focus. Rendered as a strip under the toolbar.
 pub enum Banner {
     /// The file behind a session changed on disk.
-    Reload { path: PathBuf, dirty: bool },
+    Reload {
+        session: SessionId,
+        path: PathBuf,
+        dirty: bool,
+    },
 }
 
 /// Which pane receives keyboard focus (F6 cycles).
@@ -107,6 +115,8 @@ pub struct AppShell {
     pub cache: crate::services::session_cache::DocumentSessionCache,
     /// Frame section timings.
     pub frames: crate::services::frame_observer::FrameObserver,
+    /// Last applied (theme mode, font scale, effective theme) triple.
+    prefs_applied: Option<(ThemeMode, FontScale, egui::Theme)>,
     /// Fonts are installed once per context, not per frame.
     fonts_installed: bool,
     /// Narrow-layout drawers (default open so panels stay reachable).
@@ -146,6 +156,7 @@ impl AppShell {
             open_pending: 0,
             cache: crate::services::session_cache::DocumentSessionCache::default(),
             frames: crate::services::frame_observer::FrameObserver::default(),
+            prefs_applied: None,
             fonts_installed: false,
             show_outline_drawer: true,
             show_inspector_drawer: true,
@@ -178,6 +189,46 @@ impl AppShell {
         self.search.current = 0;
     }
 
+    /// Batch-replaces every search hit with the replacement text as one
+    /// atomic `BatchReplace` command (a single undo step).
+    pub(crate) fn replace_all(&mut self) {
+        if self.search.needle.is_empty() {
+            return;
+        }
+        let Some(session) = self.workspace.active() else {
+            return;
+        };
+        let session_id = session.id;
+        let revision = session.document.revision().0;
+        let order = session.document.document_order().to_vec();
+        let needle = self.search.needle.clone();
+        let replacement = self.search.replacement.clone();
+        let case = self.search.case_sensitive;
+        let workspace = &self.workspace;
+        let document = &workspace.active().expect("checked above").document;
+        let index = self.cache.search_index(session_id, revision, document);
+        let previews = crate::services::replace::build_replacements(
+            document,
+            index,
+            &order,
+            &needle,
+            &replacement,
+            crate::services::replace::ReplaceScope::All,
+            case,
+        );
+        match previews {
+            Ok(previews) if previews.is_empty() => {}
+            Ok(previews) => {
+                let ops = crate::services::replace::to_ops(&previews);
+                self.commit(Command::BatchReplace { ops });
+                self.refresh_search();
+            }
+            Err(problem) => {
+                self.push_problem(Severity::Error, "replace", problem);
+            }
+        }
+    }
+
     /// Runs one frame.
     pub fn update(&mut self, ctx: &Context) {
         self.apply_preferences_once(ctx);
@@ -192,6 +243,9 @@ impl AppShell {
             self.search.session = active_id;
             self.refresh_search();
         }
+        // Alerts stamped from here on belong to this session (jump-to-source
+        // switches back to the owning tab).
+        self.alerts.session = active_id;
         self.handle_shortcuts(ctx);
 
         if self.alerts.panel_requested {
@@ -216,9 +270,17 @@ impl AppShell {
     }
 
     fn apply_preferences_once(&mut self, ctx: &Context) {
-        self.theme_mode.apply(ctx);
-        self.font_scale.apply(ctx);
-        apply_accent_theme(ctx);
+        // Re-apply only when the preference (or the OS theme, in System
+        // mode) actually changed — per-frame `set_zoom_factor` would fight
+        // egui's built-in zoom gestures.
+        let effective = ctx.theme();
+        let key = (self.theme_mode, self.font_scale, effective);
+        if self.prefs_applied != Some(key) {
+            self.prefs_applied = Some(key);
+            self.theme_mode.apply(ctx);
+            self.font_scale.apply(ctx);
+            apply_accent_theme(ctx);
+        }
         if !self.fonts_installed {
             fonts::install_cjk_font(ctx);
             self.fonts_installed = true;
@@ -242,6 +304,30 @@ impl AppShell {
             });
     }
 
+    /// Reloads an already-open session from disk (watcher banner action).
+    /// Runs in a background job; on success the session's document,
+    /// history, and caches are replaced wholesale.
+    pub fn reload_session(&mut self, session: SessionId, path: PathBuf) {
+        self.tasks
+            .spawn(RELOAD_SESSION, crate::core::Revision(0), move |_| {
+                let result = match std::fs::read(&path) {
+                    Ok(bytes) => match classify_bytes(&bytes) {
+                        Ok(outcome) => match XmlDocument::parse(&bytes) {
+                            Ok(document) => Ok((DocumentMode::from(outcome.mode), document)),
+                            Err(err) => Err((String::from("parse"), err.to_string())),
+                        },
+                        Err(err) => Err((String::from("too-large"), err.to_string())),
+                    },
+                    Err(err) => Err((String::from("io"), err.to_string())),
+                };
+                Box::new(ReloadJobResult {
+                    session,
+                    path,
+                    result,
+                })
+            });
+    }
+
     /// Creates a new untitled document.
     pub fn new_document(&mut self) {
         self.workspace.add_untitled();
@@ -252,6 +338,23 @@ impl AppShell {
     /// tab stays dirty when the job finishes. A pending source draft is
     /// what the user sees, so its text is what gets written.
     pub fn save_active(&mut self, path: Option<PathBuf>) -> bool {
+        // Untitled document: Save behaves as Save As instead of no-op.
+        if path.is_none()
+            && self
+                .workspace
+                .active()
+                .is_some_and(|session| session.path.is_none())
+        {
+            if self
+                .workspace
+                .active()
+                .is_some_and(|session| session.mode != DocumentMode::LargeReadOnly)
+            {
+                self.pick_and_save_as();
+                return true;
+            }
+            return false;
+        }
         let Some(session) = self.workspace.active_mut() else {
             return false;
         };
@@ -427,6 +530,17 @@ impl AppShell {
         self.close_tab_silent();
     }
 
+    /// Requests application exit: closes immediately when clean, prompts
+    /// via the unsaved-changes dialog when any session is dirty.
+    pub fn request_exit(&mut self, ctx: &Context) {
+        if self.workspace.dirty_sessions().is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.after_unsaved = Some(AfterUnsaved::Exit);
+            self.dialog = Some(Dialog::UnsavedExit);
+        }
+    }
+
     fn close_tab_silent(&mut self) {
         if let Some(session) = self.workspace.active() {
             self.recovery.remove(session.id.0);
@@ -473,6 +587,8 @@ impl AppShell {
         self.poll_save_jobs();
         self.poll_apply_jobs();
         self.poll_dialog_picks();
+        self.poll_reload_jobs();
+        self.poll_tool_jobs();
         while let Ok(Some(outcome)) = self
             .tasks
             .take_outcome(WORKSPACE_SESSION, crate::core::Revision(0))
@@ -485,11 +601,12 @@ impl AppShell {
             match *payload {
                 OpenJobResult::Opened {
                     path,
+                    file_type,
                     mode,
                     document,
                 } => {
                     self.workspace
-                        .add_opened(path.clone(), FileType::Xml, mode, document);
+                        .add_opened(path.clone(), file_type, mode, document);
                     if let Some(watcher) = self.watcher.as_mut() {
                         let _ = watcher.watch(&path);
                     }
@@ -524,7 +641,212 @@ impl AppShell {
                 DialogPick::SaveAs(Some(path)) => {
                     self.save_active(Some(path));
                 }
+                DialogPick::ValidateSchema(Some(path)) => self.spawn_validate_job(path),
+                DialogPick::DiffWith(Some(path)) => self.spawn_diff_job(path),
                 _ => {} // cancelled
+            }
+        }
+    }
+
+    /// Applies heavy tool results (XPath/XSD/diff/EXI) on the UI thread.
+    fn poll_tool_jobs(&mut self) {
+        while let Ok(Some(outcome)) = self
+            .tasks
+            .take_outcome(TOOLS_SESSION, crate::core::Revision(0))
+        {
+            let payload = *outcome
+                .result
+                .downcast::<ToolJobResult>()
+                .expect("tool job payload type");
+            self.handle_tool_result(payload);
+        }
+    }
+
+    fn handle_tool_result(&mut self, payload: ToolJobResult) {
+        match payload {
+            ToolJobResult::XPath { outcome } => match outcome {
+                Ok(XPathToolOutcome::Nodes(count)) => {
+                    let text = self.localization.msg_with(
+                        "xpath-result-nodes",
+                        Some(&crate::fluent_args!("count" => count as i32)),
+                    );
+                    self.push_problem(Severity::Info, "xpath", text);
+                }
+                Ok(XPathToolOutcome::Text(value)) => {
+                    self.push_problem(Severity::Info, "xpath", value);
+                }
+                Err(message) => {
+                    self.push_problem(Severity::Error, "xpath", message);
+                }
+            },
+            ToolJobResult::Validate { outcome } => match outcome {
+                Ok(diagnostics) => {
+                    if diagnostics.is_empty() {
+                        self.push_problem(Severity::Info, "xsd", String::from("valid"));
+                    }
+                    for diagnostic in &diagnostics {
+                        self.alerts.push_diagnostic(diagnostic);
+                    }
+                }
+                Err(message) => {
+                    self.push_problem(Severity::Error, "xsd", message);
+                }
+            },
+            ToolJobResult::Diff { outcome } => match outcome {
+                Ok(entries) if entries.is_empty() => {
+                    self.push_problem(Severity::Info, "diff", String::from("identical"));
+                }
+                Ok(entries) => {
+                    for entry in entries {
+                        self.push_problem(Severity::Info, "diff", entry);
+                    }
+                }
+                Err(message) => {
+                    self.push_problem(Severity::Error, "diff", message);
+                }
+            },
+            ToolJobResult::ExiEncode { preset, outcome } => match outcome {
+                Ok(report) => {
+                    let percent = (report.ratio * 100.0).round() as i32;
+                    let preset_name = match preset {
+                        crate::services::exi_workbench::ExiPreset::FidelityBitPacked => {
+                            "exi-preset-fidelity"
+                        }
+                        crate::services::exi_workbench::ExiPreset::ByteAligned => "exi-preset-byte",
+                        crate::services::exi_workbench::ExiPreset::PreCompression => {
+                            "exi-preset-precompression"
+                        }
+                        crate::services::exi_workbench::ExiPreset::MaximumCompression => {
+                            "exi-preset-max"
+                        }
+                    };
+                    let text = self.localization.msg_with(
+                        "exi-report",
+                        Some(&crate::fluent_args!(
+                            "preset" => self.localization.msg(preset_name),
+                            "input" => report.input_bytes as i32,
+                            "output" => report.output_bytes as i32,
+                            "percent" => percent,
+                            "ms" => report.duration_ms.round() as i32,
+                        )),
+                    );
+                    self.dialog = Some(Dialog::ExiWorkbench {
+                        preset,
+                        report: Some(text),
+                    });
+                }
+                Err(message) => {
+                    self.push_problem(Severity::Error, "exi", message);
+                }
+            },
+        }
+    }
+
+    /// Source snapshot of the active session (draft-aware), for workers.
+    fn active_source_snapshot(&self) -> Option<String> {
+        self.workspace.active().map(|session| {
+            session
+                .source_draft
+                .as_ref()
+                .map(|draft| draft.buffer.clone())
+                .unwrap_or_else(|| session.document.source().to_string())
+        })
+    }
+
+    fn spawn_validate_job(&mut self, schema_path: PathBuf) {
+        let Some(snapshot) = self.active_source_snapshot() else {
+            return;
+        };
+        self.tasks
+            .spawn(TOOLS_SESSION, crate::core::Revision(0), move |_| {
+                let outcome = (|| {
+                    let validator = crate::services::validation::compile_schema(&schema_path)
+                        .map_err(|err| err.to_string())?;
+                    let document =
+                        XmlDocument::parse(snapshot.as_bytes()).map_err(|err| err.to_string())?;
+                    Ok(crate::services::validation::validate(&document, &validator))
+                })();
+                Box::new(ToolJobResult::Validate { outcome })
+            });
+    }
+
+    fn spawn_diff_job(&mut self, other_path: PathBuf) {
+        let Some(snapshot) = self.active_source_snapshot() else {
+            return;
+        };
+        self.tasks
+            .spawn(TOOLS_SESSION, crate::core::Revision(0), move |_| {
+                let outcome = (|| {
+                    let bytes = std::fs::read(&other_path).map_err(|err| err.to_string())?;
+                    let left =
+                        XmlDocument::parse(snapshot.as_bytes()).map_err(|err| err.to_string())?;
+                    let right = XmlDocument::parse(&bytes).map_err(|err| err.to_string())?;
+                    let entries = crate::services::diff::diff_xml(
+                        &left,
+                        &right,
+                        crate::services::diff::DiffOptions::default(),
+                    )?;
+                    Ok(entries
+                        .iter()
+                        .map(|entry| {
+                            let (tag, label) = match entry {
+                                crate::services::diff::DiffEntry::Added { label } => ("+", label),
+                                crate::services::diff::DiffEntry::Removed { label } => ("-", label),
+                                crate::services::diff::DiffEntry::Modified { label, .. } => {
+                                    ("~", label)
+                                }
+                                crate::services::diff::DiffEntry::Moved { label } => (">", label),
+                            };
+                            format!("{tag} {label}")
+                        })
+                        .collect::<Vec<_>>())
+                })();
+                Box::new(ToolJobResult::Diff { outcome })
+            });
+    }
+
+    /// Applies file-reload results: the session's document is replaced
+    /// wholesale (history/draft/caches reset — the user chose to reload).
+    fn poll_reload_jobs(&mut self) {
+        while let Ok(Some(outcome)) = self
+            .tasks
+            .take_outcome(RELOAD_SESSION, crate::core::Revision(0))
+        {
+            let payload = *outcome
+                .result
+                .downcast::<ReloadJobResult>()
+                .expect("reload job payload type");
+            match payload.result {
+                Ok((mode, document)) => {
+                    if let Some(session) = self
+                        .workspace
+                        .sessions_mut()
+                        .iter_mut()
+                        .find(|session| session.id == payload.session)
+                    {
+                        session.document = document;
+                        session.mode = mode;
+                        session.history.clear();
+                        session.source_draft = None;
+                        session.selection = None;
+                        self.cache.invalidate_session(payload.session);
+                        self.expanded.remove(&payload.session);
+                        self.recovery.remove(payload.session.0);
+                        self.recent_saves
+                            .insert(canonical_path(&payload.path), std::time::Instant::now());
+                    }
+                }
+                Err((code, message)) => {
+                    let key = match code.as_str() {
+                        "too-large" => "error-too-large",
+                        "parse" => "error-parse-failed",
+                        _ => "error-io",
+                    };
+                    let text = self
+                        .localization
+                        .msg_with(key, Some(&fluent_args!("message" => message.as_str())));
+                    self.push_problem(Severity::Error, &code, text);
+                }
             }
         }
     }
@@ -579,28 +901,22 @@ impl AppShell {
             if self.recent_saves.contains_key(&canonical) {
                 continue;
             }
-            let matching = self
-                .workspace
-                .sessions()
-                .iter()
-                .filter(|session| {
-                    session
-                        .path
-                        .as_deref()
-                        .is_some_and(|p| canonical_path(p) == canonical)
-                })
-                .count();
-            if matching == 0 {
-                continue; // not an open document (stale watch entry)
-            }
-            let dirty = self.workspace.sessions().iter().any(|session| {
+            let matching = self.workspace.sessions().iter().find(|session| {
                 session
                     .path
                     .as_deref()
                     .is_some_and(|p| canonical_path(p) == canonical)
-                    && session.is_dirty()
             });
-            self.banner = Some(Banner::Reload { path, dirty });
+            let Some(matching) = matching else {
+                continue; // not an open document (stale watch entry)
+            };
+            let session_id = matching.id;
+            let dirty = matching.is_dirty();
+            self.banner = Some(Banner::Reload {
+                session: session_id,
+                path,
+                dirty,
+            });
         }
     }
 
@@ -931,16 +1247,13 @@ impl AppShell {
     }
 
     /// Encodes the active document (source snapshot) with the chosen preset
-    /// and reports the result into the Problems panel.
+    /// on a worker thread; the report reopens the workbench dialog.
     pub fn exi_encode_current(&mut self, preset: crate::services::exi_workbench::ExiPreset) {
-        let Some(session) = self.workspace.active() else {
+        let Some(snapshot) = self.active_source_snapshot() else {
             return;
         };
-        let snapshot = session.document.source().to_string();
         let settings = crate::services::exi_workbench::ExiSettings::preset(preset);
-        if settings.dropped_items().is_empty() {
-            // fidelity preset: no warning needed
-        } else {
+        if !settings.dropped_items().is_empty() {
             let items = settings.dropped_items().join(", ");
             self.push_problem(
                 Severity::Warning,
@@ -951,40 +1264,13 @@ impl AppShell {
                 ),
             );
         }
-        match crate::services::exi_workbench::encode_with_settings(&snapshot, &settings) {
-            Ok((_bytes, report)) => {
-                let percent = (report.ratio * 100.0).round() as i32;
-                let preset_name = match preset {
-                    crate::services::exi_workbench::ExiPreset::FidelityBitPacked => {
-                        "exi-preset-fidelity"
-                    }
-                    crate::services::exi_workbench::ExiPreset::ByteAligned => "exi-preset-byte",
-                    crate::services::exi_workbench::ExiPreset::PreCompression => {
-                        "exi-preset-precompression"
-                    }
-                    crate::services::exi_workbench::ExiPreset::MaximumCompression => {
-                        "exi-preset-max"
-                    }
-                };
-                let text = self.localization.msg_with(
-                    "exi-report",
-                    Some(&crate::fluent_args!(
-                        "preset" => self.localization.msg(preset_name),
-                        "input" => report.input_bytes as i32,
-                        "output" => report.output_bytes as i32,
-                        "percent" => percent,
-                        "ms" => report.duration_ms.round() as i32,
-                    )),
-                );
-                self.dialog = Some(Dialog::ExiWorkbench {
-                    preset,
-                    report: Some(text),
-                });
-            }
-            Err(err) => {
-                self.push_problem(Severity::Error, "exi", err);
-            }
-        }
+        self.tasks
+            .spawn(TOOLS_SESSION, crate::core::Revision(0), move |_| {
+                let outcome =
+                    crate::services::exi_workbench::encode_with_settings(&snapshot, &settings)
+                        .map(|(_bytes, report)| report);
+                Box::new(ToolJobResult::ExiEncode { preset, outcome })
+            });
     }
 
     /// Opens the XPath query dialog.
@@ -994,116 +1280,87 @@ impl AppShell {
         });
     }
 
-    /// Executes an XPath expression; results land in the Problems panel.
+    /// Executes an XPath expression on a worker thread; results land in
+    /// the Problems panel when the job reports back.
     pub fn execute_xpath(&mut self, expression: &str) {
-        let Some(session) = self.workspace.active() else {
+        let Some(snapshot) = self.active_source_snapshot() else {
             return;
         };
-        match crate::services::xpath::query(&session.document, expression) {
-            Ok(crate::services::xpath::XPathOutcome::NodeSet(nodes)) => {
-                let text = self.localization.msg_with(
-                    "xpath-result-nodes",
-                    Some(&crate::fluent_args!("count" => nodes.len() as i32)),
-                );
-                self.push_problem(crate::core::Severity::Info, "xpath", text);
-            }
-            Ok(crate::services::xpath::XPathOutcome::String(value)) => {
-                self.push_problem(crate::core::Severity::Info, "xpath", value);
-            }
-            Ok(crate::services::xpath::XPathOutcome::Number(value)) => {
-                self.push_problem(crate::core::Severity::Info, "xpath", value.to_string());
-            }
-            Ok(crate::services::xpath::XPathOutcome::Boolean(value)) => {
-                self.push_problem(crate::core::Severity::Info, "xpath", value.to_string());
-            }
-            Err(err) => {
-                self.push_problem(crate::core::Severity::Error, "xpath", err.to_string());
-            }
-        }
+        let expression = expression.to_string();
+        self.tasks
+            .spawn(TOOLS_SESSION, crate::core::Revision(0), move |_| {
+                let outcome = (|| {
+                    let document =
+                        XmlDocument::parse(snapshot.as_bytes()).map_err(|err| err.to_string())?;
+                    crate::services::xpath::query(&document, &expression)
+                        .map(|outcome| match outcome {
+                            crate::services::xpath::XPathOutcome::NodeSet(nodes) => {
+                                XPathToolOutcome::Nodes(nodes.len())
+                            }
+                            crate::services::xpath::XPathOutcome::String(value) => {
+                                XPathToolOutcome::Text(value)
+                            }
+                            crate::services::xpath::XPathOutcome::Number(value) => {
+                                XPathToolOutcome::Text(value.to_string())
+                            }
+                            crate::services::xpath::XPathOutcome::Boolean(value) => {
+                                XPathToolOutcome::Text(value.to_string())
+                            }
+                        })
+                        .map_err(|err| err.to_string())
+                })();
+                Box::new(ToolJobResult::XPath { outcome })
+            });
     }
 
-    /// XSD validation: pick a schema, validate, report diagnostics.
+    /// XSD validation: pick a schema (off-thread), then compile + validate
+    /// on a worker; diagnostics land in the Problems panel.
     pub fn run_validation_dialog(&mut self) {
-        let Some(schema_path) = rfd::FileDialog::new()
-            .add_filter("XSD", &["xsd"])
-            .pick_file()
-        else {
+        if self.workspace.active().is_none() {
             return;
-        };
-        match crate::services::validation::compile_schema(&schema_path) {
-            Ok(validator) => {
-                let Some(session) = self.workspace.active() else {
-                    return;
-                };
-                let diagnostics =
-                    crate::services::validation::validate(&session.document, &validator);
-                let found_issues = !diagnostics.is_empty();
-                for diagnostic in &diagnostics {
-                    self.alerts.push_diagnostic(diagnostic);
-                }
-                if !found_issues {
-                    self.push_problem(crate::core::Severity::Info, "xsd", String::from("valid"));
-                }
-            }
-            Err(err) => {
-                self.push_problem(crate::core::Severity::Error, "xsd", err.to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("XSD", &["xsd"])
+                .pick_file()
+            {
+                self.spawn_validate_job(path);
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        self.tasks
+            .spawn(DIALOG_SESSION, crate::core::Revision(0), |_| {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("XSD", &["xsd"])
+                    .pick_file();
+                Box::new(DialogPick::ValidateSchema(picked))
+            });
     }
 
-    /// Structural diff against a file on disk.
+    /// Structural diff against a file on disk; picker, parse, and diff all
+    /// run off the UI thread.
     pub fn run_diff_dialog(&mut self) {
-        let Some(other_path) = rfd::FileDialog::new()
-            .add_filter("XML", &["xml"])
-            .pick_file()
-        else {
+        if self.workspace.active().is_none() {
             return;
-        };
-        let Ok(bytes) = std::fs::read(&other_path) else {
-            return;
-        };
-        let Ok(other) = XmlDocument::parse(&bytes) else {
-            self.push_problem(
-                Severity::Error,
-                "diff",
-                self.localization.msg("error-parse-failed"),
-            );
-            return;
-        };
-        let Some(session) = self.workspace.active() else {
-            return;
-        };
-        match crate::services::diff::diff_xml(
-            &session.document,
-            &other,
-            crate::services::diff::DiffOptions::default(),
-        ) {
-            Ok(entries) if entries.is_empty() => {
-                self.push_problem(
-                    crate::core::Severity::Info,
-                    "diff",
-                    String::from("identical"),
-                );
-            }
-            Ok(entries) => {
-                for entry in &entries {
-                    let (tag, label) = match entry {
-                        crate::services::diff::DiffEntry::Added { label } => ("+", label),
-                        crate::services::diff::DiffEntry::Removed { label } => ("-", label),
-                        crate::services::diff::DiffEntry::Modified { label, .. } => ("~", label),
-                        crate::services::diff::DiffEntry::Moved { label } => (">", label),
-                    };
-                    self.push_problem(
-                        crate::core::Severity::Info,
-                        "diff",
-                        format!("{tag} {label}"),
-                    );
-                }
-            }
-            Err(err) => {
-                self.push_problem(Severity::Error, "diff", err);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("XML", &["xml"])
+                .pick_file()
+            {
+                self.spawn_diff_job(path);
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        self.tasks
+            .spawn(DIALOG_SESSION, crate::core::Revision(0), |_| {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("XML", &["xml"])
+                    .pick_file();
+                Box::new(DialogPick::DiffWith(picked))
+            });
     }
 
     pub fn pick_and_open(&mut self) {
@@ -1159,6 +1416,42 @@ impl AppShell {
 pub enum DialogPick {
     Open(Option<PathBuf>),
     SaveAs(Option<PathBuf>),
+    /// XSD schema picker for validation.
+    ValidateSchema(Option<PathBuf>),
+    /// XML file picker for structural diff.
+    DiffWith(Option<PathBuf>),
+}
+
+/// Result of a heavy tool job (runs on a worker thread over a source
+/// snapshot; the UI thread only formats and presents).
+pub enum ToolJobResult {
+    XPath {
+        outcome: Result<XPathToolOutcome, String>,
+    },
+    Validate {
+        outcome: Result<Vec<Diagnostic>, String>,
+    },
+    Diff {
+        outcome: Result<Vec<String>, String>,
+    },
+    ExiEncode {
+        preset: crate::services::exi_workbench::ExiPreset,
+        outcome: Result<crate::services::exi_workbench::ExiReport, String>,
+    },
+}
+
+/// UI-ready XPath result.
+pub enum XPathToolOutcome {
+    Nodes(usize),
+    Text(String),
+}
+
+/// Payload of a file-reload job (watcher banner "Reload").
+pub struct ReloadJobResult {
+    pub session: SessionId,
+    pub path: PathBuf,
+    #[allow(clippy::type_complexity)]
+    pub result: Result<(DocumentMode, XmlDocument), (String, String)>,
 }
 
 impl Default for AppShell {
@@ -1205,6 +1498,7 @@ pub enum AfterUnsaved {
 pub enum OpenJobResult {
     Opened {
         path: PathBuf,
+        file_type: FileType,
         mode: DocumentMode,
         document: XmlDocument,
     },
@@ -1225,7 +1519,26 @@ fn open_document_job(path: PathBuf) -> OpenJobResult {
             };
         }
     };
-    let outcome = match classify_bytes(&bytes) {
+    // EXI binaries decode to XML text first, then take the XML path.
+    let is_exi = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exi") || ext.eq_ignore_ascii_case("bin"));
+    let (file_type, xml_bytes) = if is_exi {
+        let decoded = erxi::decoder::decode(&bytes)
+            .and_then(|(events, _)| erxi::xml_serializer::events_to_xml(&events));
+        match decoded {
+            Ok(xml) => (FileType::Exi, xml.into_bytes()),
+            Err(err) => {
+                return OpenJobResult::Failed {
+                    code: String::from("parse"),
+                    message: format!("EXI decode failed: {err}"),
+                };
+            }
+        }
+    } else {
+        (FileType::Xml, bytes)
+    };
+    let outcome = match classify_bytes(&xml_bytes) {
         Ok(outcome) => outcome,
         Err(err) => {
             return OpenJobResult::Failed {
@@ -1234,10 +1547,18 @@ fn open_document_job(path: PathBuf) -> OpenJobResult {
             };
         }
     };
-    match XmlDocument::parse(&bytes) {
+    // EXI sessions are views of a binary payload: always read-only (saving
+    // XML text over the .exi file would silently destroy the encoding).
+    let mode = if file_type == FileType::Exi {
+        crate::services::document_io::OpenMode::LargeReadOnly
+    } else {
+        outcome.mode
+    };
+    match XmlDocument::parse(&xml_bytes) {
         Ok(document) => OpenJobResult::Opened {
             path,
-            mode: DocumentMode::from(outcome.mode),
+            file_type,
+            mode: DocumentMode::from(mode),
             document,
         },
         Err(err) => OpenJobResult::Failed {

@@ -22,6 +22,8 @@ pub struct Alert {
     pub message: String,
     /// 1-based position when known, for jump-to-source.
     pub position: Option<(usize, usize)>,
+    /// Session the alert belongs to; jump-to-source switches to its tab.
+    pub session: Option<crate::services::task_manager::SessionId>,
     /// How many times this alert fired (dedup counter).
     pub count: u32,
     /// Monotonic frame-stamp when first seen (oldest-first ordering).
@@ -73,6 +75,8 @@ pub struct AlertCenter {
     /// Set when a new error arrives; the shell opens the panel and clears
     /// the flag.
     pub panel_requested: bool,
+    /// Session stamped onto new alerts (the shell updates it per frame).
+    pub session: Option<crate::services::task_manager::SessionId>,
 }
 
 impl AlertCenter {
@@ -105,6 +109,7 @@ impl AlertCenter {
                 code: code.to_string(),
                 message: message.to_string(),
                 position,
+                session: self.session,
                 count: 1,
                 sequence: self.next_sequence,
             });
@@ -284,6 +289,7 @@ mod tests {
             info_count: 0,
             filter: SeverityFilter::ALL,
             panel_requested: false,
+            session: None,
         };
         for index in 0..(MAX_ALERTS + 25) {
             center.push(Severity::Info, "bulk", &format!("n{index}"));
