@@ -123,6 +123,15 @@ source-jump-line = Jump to line
 
 exi-open-workbench = Open EXI workbench
 exi-not-ready = EXI workbench arrives in step 8
+exi-dialog-title = EXI Workbench
+exi-encode = Encode document
+exi-decode = Decode EXI file…
+exi-report = {preset} · {input} B → {output} B ({percent}%) · {ms} ms
+exi-preset-fidelity = Fidelity Bit-Packed
+exi-preset-byte = Byte Aligned
+exi-preset-precompression = Pre-Compression
+exi-preset-max = Maximum Compression
+exi-fidelity-warning = These options drop: {items}
 
 search-placeholder = Search…
 search-hits = { $count } hits

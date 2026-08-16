@@ -62,6 +62,9 @@ ropey = "1.6.1"
 # Sequence diff for structural XML comparison
 similar = "=3.1.1"
 
+# SHA-256 digests for EXI reports
+sha2 = "0.10"
+
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.27"

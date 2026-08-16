@@ -42,6 +42,11 @@ pub enum Dialog {
     XPathQuery {
         expression: String,
     },
+    /// EXI workbench: chosen preset plus the last report line.
+    ExiWorkbench {
+        preset: crate::services::exi_workbench::ExiPreset,
+        report: Option<String>,
+    },
     ConfirmDelete {
         node: NodeId,
         name: String,
@@ -676,6 +681,71 @@ impl AppShell {
                     .with_argument("line", line.to_string())
                     .with_argument("column", column.to_string());
                 self.problems.push(diagnostic);
+            }
+        }
+    }
+
+    /// Opens the EXI workbench dialog for the active document.
+    pub fn open_exi_workbench(&mut self) {
+        self.dialog = Some(Dialog::ExiWorkbench {
+            preset: crate::services::exi_workbench::ExiPreset::FidelityBitPacked,
+            report: None,
+        });
+    }
+
+    /// Encodes the active document (source snapshot) with the chosen preset
+    /// and reports the result into the Problems panel.
+    pub fn exi_encode_current(&mut self, preset: crate::services::exi_workbench::ExiPreset) {
+        let Some(session) = self.workspace.active() else {
+            return;
+        };
+        let snapshot = session.document.source().to_string();
+        let settings = crate::services::exi_workbench::ExiSettings::preset(preset);
+        if settings.dropped_items().is_empty() {
+            // fidelity preset: no warning needed
+        } else {
+            let items = settings.dropped_items().join(", ");
+            self.push_problem(
+                Severity::Warning,
+                "exi-fidelity",
+                self.localization.msg_with(
+                    "exi-fidelity-warning",
+                    Some(&crate::fluent_args!("items" => items.as_str())),
+                ),
+            );
+        }
+        match crate::services::exi_workbench::encode_with_settings(&snapshot, &settings) {
+            Ok((_bytes, report)) => {
+                let percent = (report.ratio * 100.0).round() as i32;
+                let preset_name = match preset {
+                    crate::services::exi_workbench::ExiPreset::FidelityBitPacked => {
+                        "exi-preset-fidelity"
+                    }
+                    crate::services::exi_workbench::ExiPreset::ByteAligned => "exi-preset-byte",
+                    crate::services::exi_workbench::ExiPreset::PreCompression => {
+                        "exi-preset-precompression"
+                    }
+                    crate::services::exi_workbench::ExiPreset::MaximumCompression => {
+                        "exi-preset-max"
+                    }
+                };
+                let text = self.localization.msg_with(
+                    "exi-report",
+                    Some(&crate::fluent_args!(
+                        "preset" => self.localization.msg(preset_name),
+                        "input" => report.input_bytes as i32,
+                        "output" => report.output_bytes as i32,
+                        "percent" => percent,
+                        "ms" => report.duration_ms.round() as i32,
+                    )),
+                );
+                self.dialog = Some(Dialog::ExiWorkbench {
+                    preset,
+                    report: Some(text),
+                });
+            }
+            Err(err) => {
+                self.push_problem(Severity::Error, "exi", err);
             }
         }
     }

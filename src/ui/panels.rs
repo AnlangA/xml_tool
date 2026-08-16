@@ -175,11 +175,7 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
                 .button(shell.localization.msg("exi-open-workbench"))
                 .clicked()
             {
-                shell.push_problem(
-                    crate::core::Severity::Info,
-                    "exi-pending",
-                    shell.localization.msg("exi-not-ready"),
-                );
+                shell.open_exi_workbench();
             }
         });
         ui.menu_button(shell.localization.msg("menu-view"), |ui| {

@@ -41,6 +41,7 @@ fn title_key(dialog: &Dialog) -> &'static str {
     match dialog {
         Dialog::About => "dialog-about-title",
         Dialog::XPathQuery { .. } => "action-xpath",
+        Dialog::ExiWorkbench { .. } => "exi-dialog-title",
         Dialog::ConfirmDelete { .. } => "dialog-delete-title",
         Dialog::UnsavedExit => "dialog-unsaved-title",
         Dialog::ReloadBanner { .. } => "dialog-reload-title",
@@ -73,6 +74,33 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .localization
                     .msg_with("dialog-about-license", Some(&license)),
             );
+            if ui.button("OK").clicked() {
+                *keep = false;
+            }
+        }
+        Dialog::ExiWorkbench { preset, report } => {
+            use crate::services::exi_workbench::ExiPreset;
+            for (candidate, key) in [
+                (ExiPreset::FidelityBitPacked, "exi-preset-fidelity"),
+                (ExiPreset::ByteAligned, "exi-preset-byte"),
+                (ExiPreset::PreCompression, "exi-preset-precompression"),
+                (ExiPreset::MaximumCompression, "exi-preset-max"),
+            ] {
+                if ui
+                    .radio(*preset == candidate, shell.localization.msg(key))
+                    .clicked()
+                {
+                    *preset = candidate;
+                }
+            }
+            if ui.button(shell.localization.msg("exi-encode")).clicked() {
+                let preset = *preset;
+                shell.exi_encode_current(preset);
+                return;
+            }
+            if let Some(report) = report {
+                ui.monospace(report);
+            }
             if ui.button("OK").clicked() {
                 *keep = false;
             }

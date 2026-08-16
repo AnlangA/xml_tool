@@ -9,6 +9,7 @@
 
 pub mod diff;
 pub mod document_io;
+pub mod exi_workbench;
 pub mod large_file;
 pub mod outline;
 pub mod recovery;

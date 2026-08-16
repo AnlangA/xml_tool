@@ -123,6 +123,15 @@ source-jump-line = 跳转到行
 
 exi-open-workbench = 打开 EXI 工作台
 exi-not-ready = EXI 工作台将在第 8 步提供
+exi-dialog-title = EXI 工作台
+exi-encode = 编码当前文档
+exi-decode = 解码 EXI 文件…
+exi-report = {preset} · {input} B → {output} B（{percent}%）· {ms} ms
+exi-preset-fidelity = 保真 Bit-Packed
+exi-preset-byte = 字节对齐
+exi-preset-precompression = 预压缩
+exi-preset-max = 最大压缩
+exi-fidelity-warning = 当前选项将丢弃：{items}
 
 search-placeholder = 搜索…
 search-hits = { $count } 个结果
