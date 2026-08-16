@@ -11,6 +11,7 @@
 //!
 pub mod app;
 pub mod cache;
+pub mod core;
 pub mod exi;
 pub mod export;
 pub mod fixtures;
