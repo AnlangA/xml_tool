@@ -160,7 +160,7 @@ impl XmlError {
         };
         let error = XmlError::new(code, message);
         match (line, column) {
-            (Some(line), Some(column)) if line > 0 || column > 0 => {
+            (Some(line), Some(column)) if line > 0 && column > 0 => {
                 error.with_location(SourceLocation { line, column })
             }
             _ => error,

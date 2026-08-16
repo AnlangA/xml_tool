@@ -93,6 +93,9 @@ pub struct AppShell {
     pub problems_panel_open: bool,
     /// Pending jump target (1-based line, column) for the source pane.
     pub source_jump: Option<(usize, usize)>,
+    /// One-shot scroll request paired with the jump (consumed by the
+    /// source pane after it scrolls the target line into view).
+    pub pending_scroll: Option<(usize, usize)>,
     /// Search state for the active session.
     pub search: panels::SearchState,
     pub(crate) pending_new_attr: bool,
@@ -112,6 +115,8 @@ pub struct AppShell {
     /// Paths we saved recently: watcher events for these are our own
     /// writes, not external modifications.
     pub(crate) recent_saves: HashMap<PathBuf, std::time::Instant>,
+    /// Last time crash-recovery snapshots were written.
+    pub(crate) last_recovery_write: std::time::Instant,
 }
 
 impl AppShell {
@@ -132,6 +137,7 @@ impl AppShell {
             alerts: crate::ui::alerts::AlertCenter::default(),
             problems_panel_open: false,
             source_jump: None,
+            pending_scroll: None,
             search: panels::SearchState::default(),
             pending_new_attr: false,
             pending_remove_attr: None,
@@ -143,6 +149,7 @@ impl AppShell {
             show_inspector_drawer: true,
             after_unsaved: None,
             recent_saves: HashMap::new(),
+            last_recovery_write: std::time::Instant::now(),
         }
     }
 
@@ -175,6 +182,7 @@ impl AppShell {
         let started = std::time::Instant::now();
         self.poll_background_jobs();
         self.poll_file_watcher();
+        self.maybe_snapshot_recovery();
         self.frames.record("background-poll", started.elapsed());
         // Search hits are session-scoped; switching tabs rebuilds them.
         let active_id = self.workspace.active_id();
@@ -256,7 +264,7 @@ impl AppShell {
         let source = session
             .source_draft
             .as_ref()
-            .map(|draft| draft.buffer.text())
+            .map(|draft| draft.buffer.clone())
             .unwrap_or_else(|| session.document.source().to_string());
         let encoding = session.document.encoding();
         // Save As re-targets the session; re-point the file watcher too.
@@ -309,7 +317,7 @@ impl AppShell {
             let source = session
                 .source_draft
                 .as_ref()
-                .map(|draft| draft.buffer.text())
+                .map(|draft| draft.buffer.clone())
                 .unwrap_or_else(|| session.document.source().to_string());
             let bytes = crate::xml::encoding::encode_xml_text(&source, session.document.encoding());
             match save_bytes_atomically(&path, &bytes) {
@@ -378,6 +386,20 @@ impl AppShell {
             self.cache
                 .invalidate_revisions(session.id, session.document.revision().0);
         }
+    }
+
+    /// Whether the active session has undo history (menu + toolbar).
+    pub(crate) fn can_undo(&self) -> bool {
+        self.workspace
+            .active()
+            .is_some_and(|session| session.history.undo_depth() > 0)
+    }
+
+    /// Whether the active session has redo history (menu + toolbar).
+    pub(crate) fn can_redo(&self) -> bool {
+        self.workspace
+            .active()
+            .is_some_and(|session| session.history.redo_depth() > 0)
     }
 
     /// Redo on the active session.
@@ -559,6 +581,37 @@ impl AppShell {
         }
     }
 
+    /// Writes crash-recovery snapshots for dirty sessions (throttled to
+    /// once per 30 seconds; snapshots are removed on save/close/discard).
+    fn maybe_snapshot_recovery(&mut self) {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        if self.last_recovery_write.elapsed() < INTERVAL {
+            return;
+        }
+        self.last_recovery_write = std::time::Instant::now();
+        for session in self.workspace.sessions() {
+            if !session.is_dirty() {
+                continue;
+            }
+            // The visible text is what a crash should restore.
+            let source = session
+                .source_draft
+                .as_ref()
+                .map(|draft| draft.buffer.clone())
+                .unwrap_or_else(|| session.document.source().to_string());
+            let snapshot = RecoverySnapshot {
+                title: session.display_name(),
+                path: session.path.clone(),
+                source,
+                dirty: true,
+                cursor: 0,
+                selection_path: None,
+                written_at: 0, // stamped by the store
+            };
+            let _ = self.recovery.write(session.id.0, &snapshot);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Layout
     // -----------------------------------------------------------------------
@@ -572,10 +625,10 @@ impl AppShell {
         let has_document = self.workspace.active().is_some();
 
         if has_document && outline_inline {
-            panels::outline_panel(ctx, self, false);
+            panels::outline_panel(ctx, self);
         }
         if has_document && inspector_inline {
-            panels::inspector_panel(ctx, self, false);
+            panels::inspector_panel(ctx, self);
         }
         panels::central_panel(ctx, self);
         // Narrow windows: panels become overlay drawers (drawn after and
@@ -683,11 +736,13 @@ impl AppShell {
         }
         if wants(find) {
             self.search.open = true;
+            self.search.focus_pending = true;
             self.focus = FocusPane::Outline;
         }
         if wants(replace) {
             // Batch replace UI arrives with step 7; find is the entry point.
             self.search.open = true;
+            self.search.focus_pending = true;
             self.focus = FocusPane::Outline;
         }
         if wants(KeyboardShortcut::new(Modifiers::NONE, Key::F3)) {
@@ -703,6 +758,24 @@ impl AppShell {
                 FocusPane::Inspector => FocusPane::Problems,
                 FocusPane::Problems => FocusPane::Outline,
             };
+            // Make the cycle visible: moving to the source pane focuses the
+            // editor; moving to the outline focuses the search field when open.
+            match self.focus {
+                FocusPane::Source => {
+                    if let Some(session) = self.workspace.active() {
+                        let id = egui::Id::new((
+                            "source",
+                            session.document.revision().0,
+                            session.source_draft.is_some(),
+                        ));
+                        ctx.memory_mut(|memory| memory.request_focus(id));
+                    }
+                }
+                FocusPane::Outline if self.search.open => {
+                    self.search.focus_pending = true;
+                }
+                _ => {}
+            }
         }
         if wants(KeyboardShortcut::new(Modifiers::NONE, Key::F1)) {
             self.dialog = Some(Dialog::Shortcuts);
@@ -721,7 +794,7 @@ impl AppShell {
             return false;
         };
         let base_revision = draft.base_revision;
-        let draft_text = draft.buffer.text();
+        let draft_text = draft.buffer.clone();
         let session_id = session.id;
         self.tasks
             .spawn(APPLY_SESSION, crate::core::Revision(0), move |_| {
@@ -742,7 +815,7 @@ impl AppShell {
             return;
         };
         match session.source_draft.as_mut() {
-            Some(draft) => draft.buffer = crate::services::source_buffer::SourceBuffer::new(&text),
+            Some(draft) => draft.buffer = text,
             None => {
                 session.source_draft = Some(crate::services::source_editor::SourceDraft::fork(
                     &text,
@@ -787,7 +860,7 @@ impl AppShell {
         if session
             .source_draft
             .as_ref()
-            .map(|draft| draft.buffer.text())
+            .map(|draft| draft.buffer.clone())
             .as_deref()
             != Some(payload.draft_text.as_str())
         {
