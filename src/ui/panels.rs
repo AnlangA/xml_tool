@@ -45,6 +45,8 @@ pub struct SearchState {
     pub current: usize,
     /// Session the hits belong to; switching tabs invalidates them.
     pub session: Option<crate::services::task_manager::SessionId>,
+    /// Document revision the hits were computed for; edits invalidate them.
+    pub revision: Option<u64>,
     /// Set when the box is (re)opened: the field grabs keyboard focus.
     pub focus_pending: bool,
     /// Replacement text for batch replace (the row under the search box).
@@ -563,86 +565,93 @@ fn outline_contents(ui: &mut Ui, shell: &mut AppShell) {
     let body_font = egui::TextStyle::Body.resolve(ui.style());
     let arrow_font = FontId::proportional(body_font.size - 1.0);
 
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show_rows(ui, OUTLINE_ROW_HEIGHT, rows.len(), |ui, range| {
-            for row in &rows[range] {
-                let (rect, response) = ui.allocate_exact_size(
-                    vec2(ui.available_width().max(1.0), OUTLINE_ROW_HEIGHT),
-                    Sense::click(),
+    // One-shot scroll (search-hit reveal): aim a bit above the row so some
+    // context stays visible.
+    let mut area = ScrollArea::vertical().auto_shrink([false, false]);
+    if let Some(target) = shell.outline_scroll_to.take()
+        && let Some(index) = rows.iter().position(|row| row.node == target)
+    {
+        area = area.vertical_scroll_offset((index as f32 * OUTLINE_ROW_HEIGHT - 60.0).max(0.0));
+    }
+
+    area.show_rows(ui, OUTLINE_ROW_HEIGHT, rows.len(), |ui, range| {
+        for row in &rows[range] {
+            let (rect, response) = ui.allocate_exact_size(
+                vec2(ui.available_width().max(1.0), OUTLINE_ROW_HEIGHT),
+                Sense::click(),
+            );
+            let is_selected = selection == Some(row.node) || search_node == Some(row.node);
+            let painter = ui.painter_at(rect);
+            if is_selected {
+                painter.rect_filled(rect, CornerRadius::same(4), pal.selection);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+                    CornerRadius::ZERO,
+                    pal.accent,
                 );
-                let is_selected = selection == Some(row.node) || search_node == Some(row.node);
-                let painter = ui.painter_at(rect);
-                if is_selected {
-                    painter.rect_filled(rect, CornerRadius::same(4), pal.selection);
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
-                        CornerRadius::ZERO,
-                        pal.accent,
-                    );
-                } else if response.hovered() {
-                    painter.rect_filled(rect, CornerRadius::same(4), pal.hover_bg);
-                }
+            } else if response.hovered() {
+                painter.rect_filled(rect, CornerRadius::same(4), pal.hover_bg);
+            }
 
-                let indent = (row.depth as f32) * OUTLINE_INDENT;
-                if row.expandable {
-                    let arrow = if row.expanded { "▾" } else { "▸" };
-                    painter.text(
-                        egui::pos2(
-                            rect.min.x + indent + OUTLINE_ARROW_WIDTH * 0.5,
-                            rect.center().y,
-                        ),
-                        Align2::CENTER_CENTER,
-                        arrow,
-                        arrow_font.clone(),
-                        pal.text_secondary,
-                    );
-                }
-
-                let kind = shell
-                    .workspace
-                    .active()
-                    .and_then(|s| s.document.kind(row.node));
-                let label_text = shell
-                    .workspace
-                    .active()
-                    .map(|s| row_label(&s.document, row.node))
-                    .unwrap_or_default();
-                let name_color = match kind {
-                    Some(XmlNodeKind::Comment) => pal.comment,
-                    Some(XmlNodeKind::Text) | Some(XmlNodeKind::CData) => pal.text_secondary,
-                    Some(XmlNodeKind::ProcessingInstruction) => pal.syntax_keyword,
-                    _ => pal.element_name,
-                };
-                let color = if is_selected {
-                    pal.text_highlight
-                } else {
-                    name_color
-                };
+            let indent = (row.depth as f32) * OUTLINE_INDENT;
+            if row.expandable {
+                let arrow = if row.expanded { "▾" } else { "▸" };
                 painter.text(
-                    egui::pos2(rect.min.x + indent + OUTLINE_ARROW_WIDTH, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    label_text,
-                    body_font.clone(),
-                    color,
+                    egui::pos2(
+                        rect.min.x + indent + OUTLINE_ARROW_WIDTH * 0.5,
+                        rect.center().y,
+                    ),
+                    Align2::CENTER_CENTER,
+                    arrow,
+                    arrow_font.clone(),
+                    pal.text_secondary,
                 );
+            }
 
-                if response.double_clicked() {
+            let kind = shell
+                .workspace
+                .active()
+                .and_then(|s| s.document.kind(row.node));
+            let label_text = shell
+                .workspace
+                .active()
+                .map(|s| row_label(&s.document, row.node))
+                .unwrap_or_default();
+            let name_color = match kind {
+                Some(XmlNodeKind::Comment) => pal.comment,
+                Some(XmlNodeKind::Text) | Some(XmlNodeKind::CData) => pal.text_secondary,
+                Some(XmlNodeKind::ProcessingInstruction) => pal.syntax_keyword,
+                _ => pal.element_name,
+            };
+            let color = if is_selected {
+                pal.text_highlight
+            } else {
+                name_color
+            };
+            painter.text(
+                egui::pos2(rect.min.x + indent + OUTLINE_ARROW_WIDTH, rect.center().y),
+                Align2::LEFT_CENTER,
+                label_text,
+                body_font.clone(),
+                color,
+            );
+
+            if response.double_clicked() {
+                toggle = Some(row.node);
+            } else if response.clicked() {
+                let arrow_zone_end = rect.min.x + indent + OUTLINE_ARROW_WIDTH;
+                let on_arrow = row.expandable
+                    && response
+                        .interact_pointer_pos()
+                        .is_some_and(|pos| pos.x <= arrow_zone_end);
+                if on_arrow {
                     toggle = Some(row.node);
-                } else if response.clicked() {
-                    let arrow_zone_end = rect.min.x + indent + OUTLINE_ARROW_WIDTH;
-                    let on_arrow = row.expandable
-                        && response
-                            .interact_pointer_pos()
-                            .is_some_and(|pos| pos.x <= arrow_zone_end);
-                    if on_arrow {
-                        toggle = Some(row.node);
-                    } else {
-                        select = Some(row.node);
-                    }
+                } else {
+                    select = Some(row.node);
                 }
             }
-        });
+        }
+    });
 
     if let Some(node) = toggle {
         shell.toggle_expanded(session_id, node);
@@ -836,7 +845,7 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
         };
         let revision = session.document.revision();
 
-        if let Some((line, column)) = shell.source_jump {
+        if let Some((_, line, column)) = shell.source_jump {
             let hint = shell.localization.msg_with(
                 "source-jump-hint",
                 Some(&crate::fluent_args!(
@@ -942,7 +951,7 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
                     ui.add_enabled(false, viewer)
                 };
                 changed = response.changed();
-                if let Some((line, _column)) = scroll_to {
+                if let Some((_, line, _column)) = scroll_to {
                     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
                     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
                     let top = row_height * (line.saturating_sub(1)) as f32;
@@ -1269,8 +1278,11 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
             shell.workspace.select(index);
         }
         if let Some(position) = position {
-            shell.source_jump = Some(position);
-            shell.pending_scroll = Some(position);
+            let owner = session
+                .or_else(|| shell.workspace.active_id())
+                .unwrap_or(crate::services::task_manager::SessionId(0));
+            shell.source_jump = Some((owner, position.0, position.1));
+            shell.pending_scroll = Some((owner, position.0, position.1));
             shell.focus = FocusPane::Source;
         }
     }

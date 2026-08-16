@@ -396,7 +396,8 @@ fn reload_banner_is_non_blocking_and_dismissable() {
 fn jump_target_hint_appears_in_source_pane() {
     let mut shell = combo_shell(Language::English, ThemeMode::Dark);
     shell.new_document();
-    shell.source_jump = Some((4, 2));
+    let session = shell.workspace.active_id().expect("active session");
+    shell.source_jump = Some((session, 4, 2));
     shell.problems_panel_open = false;
     let mut harness = Harness::new_state(|ctx, shell| shell.update(ctx), shell);
     harness.set_size(egui::vec2(1280.0, 800.0));
