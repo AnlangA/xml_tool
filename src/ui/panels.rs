@@ -575,19 +575,51 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
                     .small(),
             );
         }
-        // Read-only source preview; the draft workflow arrives in step 6.
-        let mut preview = session.document.source().to_string();
+
+        let editable = session.mode == DocumentMode::Editable;
+        let draft_active = session.source_draft.is_some();
+        let mut text = session
+            .source_draft
+            .as_ref()
+            .map(|draft| draft.buffer.text())
+            .unwrap_or_else(|| session.document.source().to_string());
+        let revision = session.document.revision();
+
+        if draft_active {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(shell.localization.msg("source-draft-active"))
+                        .color(Theme::WARNING)
+                        .small(),
+                );
+                if ui.button(shell.localization.msg("source-apply")).clicked() {
+                    shell.apply_source();
+                }
+                if ui
+                    .button(shell.localization.msg("source-discard-draft"))
+                    .clicked()
+                {
+                    shell.discard_draft();
+                }
+            });
+        }
+
+        let mut changed = false;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
-                    TextEdit::multiline(&mut preview)
-                        .font(egui::TextStyle::Monospace)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .lock_focus(true),
-                );
+                let editor = TextEdit::multiline(&mut text)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .lock_focus(true)
+                    .id(egui::Id::new(("source", revision.0, draft_active)));
+                let response = ui.add_enabled(editable, editor);
+                changed = response.changed();
             });
+        if changed {
+            shell.update_source_text(text);
+        }
     });
 }
 

@@ -32,6 +32,8 @@ use crate::ui::theme_prefs::{FontScale, ThemeMode, apply_accent_theme};
 const WORKSPACE_SESSION: SessionId = SessionId(u64::MAX);
 /// Pseudo-session for save jobs (delivered regardless of document revision).
 const SAVE_SESSION: SessionId = SessionId(u64::MAX - 1);
+/// Pseudo-session for source-draft apply jobs.
+const APPLY_SESSION: SessionId = SessionId(u64::MAX - 2);
 
 /// Modal dialogs the shell can show.
 pub enum Dialog {
@@ -231,6 +233,14 @@ impl AppShell {
         let Some(session) = self.workspace.active_mut() else {
             return false;
         };
+        if session.source_draft.is_some() {
+            self.push_problem(
+                Severity::Warning,
+                "draft-active",
+                self.localization.msg("source-draft-active"),
+            );
+            return false; // tree edits are disabled while a draft exists
+        }
         if session.mode == DocumentMode::LargeReadOnly {
             self.push_problem(
                 Severity::Warning,
@@ -317,6 +327,7 @@ impl AppShell {
 
     fn poll_background_jobs(&mut self) {
         self.poll_save_jobs();
+        self.poll_apply_jobs();
         while let Ok(Some(outcome)) = self
             .tasks
             .take_outcome(WORKSPACE_SESSION, crate::core::Revision(0))
@@ -558,6 +569,113 @@ impl AppShell {
         }
     }
 
+    /// Applies the active session's source draft: the parse runs in a
+    /// background job attributed to the draft's base revision; a success
+    /// commits one `ReplaceWholeSource`, a failure keeps the draft and
+    /// reports the exact error position.
+    pub fn apply_source(&mut self) -> bool {
+        let Some(session) = self.workspace.active_mut() else {
+            return false;
+        };
+        let Some(draft) = session.source_draft.as_ref() else {
+            return false;
+        };
+        let base_revision = draft.base_revision;
+        let draft_text = draft.buffer.text();
+        let session_id = session.id;
+        self.tasks
+            .spawn(APPLY_SESSION, crate::core::Revision(0), move |_| {
+                Box::new(ApplyJobResult {
+                    session: session_id,
+                    base_revision,
+                    outcome: crate::services::source_editor::parse_draft(&draft_text),
+                })
+            });
+        true
+    }
+
+    /// Records source-pane text: first change forks a draft at the current
+    /// revision; later keystrokes only update the buffer.
+    pub fn update_source_text(&mut self, text: String) {
+        let Some(session) = self.workspace.active_mut() else {
+            return;
+        };
+        match session.source_draft.as_mut() {
+            Some(draft) => draft.buffer = crate::services::source_buffer::SourceBuffer::new(&text),
+            None => {
+                session.source_draft = Some(crate::services::source_editor::SourceDraft::fork(
+                    &text,
+                    session.document.revision(),
+                ));
+            }
+        }
+    }
+
+    /// Discards the active session's draft without applying.
+    pub fn discard_draft(&mut self) {
+        if let Some(session) = self.workspace.active_mut() {
+            session.source_draft = None;
+        }
+    }
+
+    fn poll_apply_jobs(&mut self) {
+        while let Ok(Some(outcome)) = self
+            .tasks
+            .take_outcome(APPLY_SESSION, crate::core::Revision(0))
+        {
+            let payload = *outcome
+                .result
+                .downcast::<ApplyJobResult>()
+                .expect("apply job payload type");
+            self.handle_apply_result(payload);
+        }
+    }
+
+    fn handle_apply_result(&mut self, payload: ApplyJobResult) {
+        let Some(session) = self
+            .workspace
+            .sessions_mut()
+            .iter_mut()
+            .find(|session| session.id == payload.session)
+        else {
+            return;
+        };
+        if session.document.revision() != payload.base_revision {
+            return; // document moved on: the draft stays unapplied
+        }
+        match payload.outcome {
+            crate::services::source_editor::ApplyOutcome::Parsed { new_source } => {
+                session.source_draft = None;
+                let revision_before = session.document.revision();
+                let _ = revision_before;
+                // Commit through the command layer so undo/redo covers it.
+                let result = session.history.commit(
+                    &mut session.document,
+                    Command::ReplaceWholeSource { new_source },
+                );
+                match result {
+                    Ok(_) => {
+                        self.outline_cache = None;
+                        self.search.index = None;
+                    }
+                    Err(err) => {
+                        self.push_problem(Severity::Error, err.code, err.message.clone());
+                    }
+                }
+            }
+            crate::services::source_editor::ApplyOutcome::Invalid {
+                line,
+                column,
+                message,
+            } => {
+                let diagnostic = Diagnostic::new(Severity::Error, "source-draft", message.clone())
+                    .with_argument("line", line.to_string())
+                    .with_argument("column", column.to_string());
+                self.problems.push(diagnostic);
+            }
+        }
+    }
+
     pub fn pick_and_open(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("XML", &["xml"])
@@ -583,6 +701,13 @@ impl Default for AppShell {
     fn default() -> Self {
         AppShell::new()
     }
+}
+
+/// Payload of the background draft-apply job.
+pub struct ApplyJobResult {
+    pub session: SessionId,
+    pub base_revision: crate::core::Revision,
+    pub outcome: crate::services::source_editor::ApplyOutcome,
 }
 
 /// Payload of the background save job.
@@ -642,7 +767,7 @@ fn open_document_job(path: PathBuf) -> OpenJobResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Command, InsertPosition, NewNode};
+    use crate::core::{Command, InsertPosition, NewNode, QNameSpec};
     use crate::services::workspace::DocumentMode;
 
     /// Equivalents of the four `main_panel` tests deleted with step 5,
@@ -751,6 +876,171 @@ mod tests {
         assert!(!session.is_dirty(), "save must mark the tab clean");
         assert_eq!(session.path.as_deref(), Some(path.as_path()));
         assert!(path.exists());
+    }
+
+    /// Drains apply jobs until none are pending (bounded wait).
+    fn drain_apply_jobs(shell: &mut AppShell) {
+        for _ in 0..200 {
+            shell.poll_apply_jobs();
+            if shell
+                .workspace
+                .active()
+                .and_then(|s| s.source_draft.as_ref())
+                .is_none()
+            {
+                // Applied (draft cleared) — drain once more for stragglers.
+                shell.poll_apply_jobs();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn draft_disables_all_tree_edits() {
+        let mut shell = shell_with_edited_document();
+        let root = shell
+            .workspace
+            .active()
+            .unwrap()
+            .document
+            .root_element()
+            .unwrap();
+        let source = shell
+            .workspace
+            .active()
+            .unwrap()
+            .document
+            .source()
+            .to_string();
+        shell.update_source_text(source);
+
+        assert!(
+            !shell.commit(Command::RenameElement {
+                node: root,
+                new_name: QNameSpec::local("blocked"),
+            }),
+            "tree edits must be rejected while a draft exists"
+        );
+        assert!(
+            shell
+                .problems
+                .iter()
+                .any(|problem| problem.code == "draft-active")
+        );
+        // The failure left no trace.
+        assert_eq!(
+            shell.workspace.active().unwrap().document.revision().0,
+            1,
+            "rejected edit must not bump the revision"
+        );
+    }
+
+    #[test]
+    fn apply_source_renames_show_up_and_undo_covers_apply() {
+        let mut shell = AppShell::new();
+        shell.new_document();
+        // Seed a child element via the tree, then rename it in the source.
+        let root = shell
+            .workspace
+            .active()
+            .unwrap()
+            .document
+            .root_element()
+            .unwrap();
+        assert!(shell.commit(Command::InsertNode {
+            parent: root,
+            position: InsertPosition::Last,
+            node: NewNode::Element {
+                name: "old-name".into()
+            },
+        }));
+        shell.undo(); // keep the document minimal and clean
+        shell.problems.clear();
+
+        let mut text = shell
+            .workspace
+            .active()
+            .unwrap()
+            .document
+            .source()
+            .to_string();
+        text = text.replacen("root", "renamed-root", 2);
+        shell.update_source_text(text);
+        assert!(shell.workspace.active().unwrap().source_draft.is_some());
+
+        assert!(shell.apply_source());
+        drain_apply_jobs(&mut shell);
+
+        let session = shell.workspace.active().unwrap();
+        assert!(
+            session.source_draft.is_none(),
+            "successful apply clears the draft"
+        );
+        assert!(
+            session.document.source().contains("renamed-root"),
+            "applied source: {}",
+            session.document.source()
+        );
+
+        // One undo restores the pre-apply source (Apply is one command).
+        shell.undo();
+        let session = shell.workspace.active().unwrap();
+        assert!(
+            !session.document.source().contains("renamed-root"),
+            "undo must revert the whole apply"
+        );
+    }
+
+    #[test]
+    fn invalid_apply_keeps_draft_and_reports_position() {
+        let mut shell = AppShell::new();
+        shell.new_document();
+        let revision_before = shell.workspace.active().unwrap().document.revision();
+        let source_before = shell
+            .workspace
+            .active()
+            .unwrap()
+            .document
+            .source()
+            .to_string();
+
+        let broken = format!("{source_before}<unclosed");
+        shell.update_source_text(broken.clone());
+        assert!(shell.apply_source());
+
+        // Give the job a moment, then drain.
+        for _ in 0..200 {
+            shell.poll_apply_jobs();
+            if shell
+                .problems
+                .iter()
+                .any(|problem| problem.code == "source-draft")
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let session = shell.workspace.active().unwrap();
+        assert!(
+            session.source_draft.is_some(),
+            "invalid apply must keep the draft"
+        );
+        assert_eq!(
+            session.document.revision(),
+            revision_before,
+            "invalid apply must not touch the DOM"
+        );
+        assert_eq!(session.document.source(), source_before);
+        assert!(
+            shell
+                .problems
+                .iter()
+                .any(|problem| problem.code == "source-draft"
+                    && problem.arguments.contains_key("line")
+                    && problem.arguments.contains_key("column"))
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod outline;
 pub mod recovery;
 pub mod search;
 pub mod source_buffer;
+pub mod source_editor;
 pub mod task_manager;
 pub mod watcher;
 pub mod workspace;

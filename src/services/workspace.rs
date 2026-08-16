@@ -50,8 +50,8 @@ pub struct DocumentSession {
     pub cursor: usize,
     /// Selected tree node, when the tree is the active pane.
     pub selection: Option<NodeId>,
-    /// Present when the source editor holds an unapplied draft (step 6).
-    pub source_draft: Option<String>,
+    /// Present when the source editor holds an unapplied draft.
+    pub source_draft: Option<crate::services::source_editor::SourceDraft>,
 }
 
 impl DocumentSession {
