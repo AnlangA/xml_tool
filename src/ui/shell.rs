@@ -33,6 +33,8 @@ const WORKSPACE_SESSION: SessionId = SessionId(u64::MAX);
 const SAVE_SESSION: SessionId = SessionId(u64::MAX - 1);
 /// Pseudo-session for source-draft apply jobs.
 const APPLY_SESSION: SessionId = SessionId(u64::MAX - 2);
+/// Pseudo-session for native file-dialog picks (run off the UI thread).
+const DIALOG_SESSION: SessionId = SessionId(u64::MAX - 3);
 
 /// Modal dialogs the shell can show.
 pub enum Dialog {
@@ -470,6 +472,7 @@ impl AppShell {
     fn poll_background_jobs(&mut self) {
         self.poll_save_jobs();
         self.poll_apply_jobs();
+        self.poll_dialog_picks();
         while let Ok(Some(outcome)) = self
             .tasks
             .take_outcome(WORKSPACE_SESSION, crate::core::Revision(0))
@@ -502,6 +505,26 @@ impl AppShell {
                         .msg_with(key, Some(&fluent_args!("message" => message.as_str())));
                     self.push_problem(Severity::Error, &code, text);
                 }
+            }
+        }
+    }
+
+    /// Applies native file-dialog picks delivered by worker threads.
+    fn poll_dialog_picks(&mut self) {
+        while let Ok(Some(outcome)) = self
+            .tasks
+            .take_outcome(DIALOG_SESSION, crate::core::Revision(0))
+        {
+            let pick = *outcome
+                .result
+                .downcast::<DialogPick>()
+                .expect("dialog pick payload type");
+            match pick {
+                DialogPick::Open(Some(path)) => self.open_path(path),
+                DialogPick::SaveAs(Some(path)) => {
+                    self.save_active(Some(path));
+                }
+                _ => {} // cancelled
             }
         }
     }
@@ -1084,24 +1107,58 @@ impl AppShell {
     }
 
     pub fn pick_and_open(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML", &["xml"])
-            .add_filter("EXI", &["exi", "bin"])
-            .pick_file()
+        // The native dialog blocks for as long as it stays open; on the UI
+        // thread that froze the whole app (a multi-second "top-bar" frame).
+        // Run it on a worker and deliver the pick through the task manager.
+        // (macOS requires panels on the main thread — keep it synchronous.)
+        #[cfg(target_os = "macos")]
         {
-            self.open_path(path);
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("XML", &["xml"])
+                .add_filter("EXI", &["exi", "bin"])
+                .pick_file()
+            {
+                self.open_path(path);
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        self.tasks
+            .spawn(DIALOG_SESSION, crate::core::Revision(0), |_| {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("XML", &["xml"])
+                    .add_filter("EXI", &["exi", "bin"])
+                    .pick_file();
+                Box::new(DialogPick::Open(picked))
+            });
     }
 
     pub fn pick_and_save_as(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML", &["xml"])
-            .set_file_name("document.xml")
-            .save_file()
+        #[cfg(target_os = "macos")]
         {
-            self.save_active(Some(path));
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("XML", &["xml"])
+                .set_file_name("document.xml")
+                .save_file()
+            {
+                self.save_active(Some(path));
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        self.tasks
+            .spawn(DIALOG_SESSION, crate::core::Revision(0), |_| {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("XML", &["xml"])
+                    .set_file_name("document.xml")
+                    .save_file();
+                Box::new(DialogPick::SaveAs(picked))
+            });
     }
+}
+
+/// Result of a native file dialog running off the UI thread.
+pub enum DialogPick {
+    Open(Option<PathBuf>),
+    SaveAs(Option<PathBuf>),
 }
 
 impl Default for AppShell {
