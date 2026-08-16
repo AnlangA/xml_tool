@@ -1446,7 +1446,7 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 [[package]]
 name = "erxi"
 version = "0.1.0"
-source = "git+https://github.com/schachmadinejad/erxi#4148209c3fb11786ee81b54861e6f6d421905043"
+source = "git+https://github.com/schachmadinejad/erxi?rev=4148209c3fb11786ee81b54861e6f6d421905043#4148209c3fb11786ee81b54861e6f6d421905043"
 dependencies = [
  "ahash",
  "base64",
@@ -5080,7 +5080,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xml_tool"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",

@@ -1045,7 +1045,7 @@ fn apply_delete_node(
     let range = document
         .range_entry(node)
         .ok_or_else(|| CommandError::new("range_unknown", "node byte range unknown", Some(node)))?;
-    let bytes = document.source()[range.0..range.1].to_string();
+    let bytes = document.source_slice(range).to_string();
     let rendered = document.qname(node).map(|q| q.render());
     let position = position_among(document, node).expect("child of parent");
 
@@ -1122,7 +1122,7 @@ fn apply_move_node(
     let range = document
         .range_entry(node)
         .ok_or_else(|| CommandError::new("range_unknown", "node byte range unknown", Some(node)))?;
-    let bytes = document.source()[range.0..range.1].to_string();
+    let bytes = document.source_slice(range).to_string();
 
     // Pull the subtree's range entries out before any splicing so the
     // removal cannot shift them; they are re-seeded at the destination.
@@ -1249,7 +1249,7 @@ fn apply_duplicate_subtree(
     let range = document
         .range_entry(node)
         .ok_or_else(|| CommandError::new("range_unknown", "node byte range unknown", Some(node)))?;
-    let bytes = document.source()[range.0..range.1].to_string();
+    let bytes = document.source_slice(range).to_string();
 
     let copy_id = {
         let engine = document.engine_doc_mut();

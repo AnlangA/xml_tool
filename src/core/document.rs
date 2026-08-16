@@ -151,6 +151,16 @@ pub struct SourceRange {
     pub end_column: usize,
 }
 
+/// Summary `Debug` for test diagnostics; never prints the full source.
+impl std::fmt::Debug for XmlDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XmlDocument")
+            .field("revision", &self.revision.0)
+            .field("source_len", &self.source.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The authoritative document: engine DOM + current source + ranges +
 /// indexes + revision.
 pub struct XmlDocument {
@@ -412,6 +422,15 @@ impl XmlDocument {
         self.revision = Revision(value);
     }
 
+    /// Source slice for a stored range, clamped to the current length.
+    /// Range staleness must degrade to cosmetics (a shorter slice), never
+    /// panic — the DOM is the source of truth.
+    pub(crate) fn source_slice(&self, range: (usize, usize)) -> &str {
+        let end = range.1.min(self.source.len());
+        let start = range.0.min(end);
+        &self.source[start..end]
+    }
+
     pub(crate) fn range_entry(&self, node: NodeId) -> Option<(usize, usize)> {
         self.ranges.get(&node.0).copied()
     }
@@ -427,12 +446,24 @@ impl XmlDocument {
     /// Replaces `range` in the source with `replacement`, shifting every
     /// stored range after it by the length delta.
     pub(crate) fn splice_source(&mut self, range: Range<usize>, replacement: &str) {
+        // Total function: a stale caller range clamps to the current
+        // length instead of panicking (DOM remains the source of truth).
+        let end = range.end.min(self.source.len());
+        let start = range.start.min(end);
+        let range = start..end;
         self.source.replace_range(range.clone(), replacement);
         let delta = replacement.len() as i64 - (range.end - range.start) as i64;
         if delta != 0 {
             for entry in self.ranges.values_mut() {
                 if entry.0 >= range.end {
+                    // Node starts after the splice: shift both ends.
                     entry.0 = (entry.0 as i64 + delta) as usize;
+                    entry.1 = (entry.1 as i64 + delta) as usize;
+                } else if entry.1 > range.end {
+                    // Ancestor strictly containing the splice: its end
+                    // moves with the content. A node ending exactly at the
+                    // splice point keeps its end (insertion at its tail
+                    // is not inside it).
                     entry.1 = (entry.1 as i64 + delta) as usize;
                 }
             }

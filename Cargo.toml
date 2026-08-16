@@ -1,6 +1,6 @@
 [package]
 name = "xml_tool"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["XML Tool Contributors"]
@@ -14,7 +14,9 @@ categories = ["gui", "parsing", "visualization"]
 uppsala = "=0.9.0"
 
 # EXI (Efficient XML Interchange) encoding/decoding
-erxi = { git = "https://github.com/schachmadinejad/erxi", default-features = false }
+# EXI backend, pinned to the plan's fixed commit. PolyForm-Noncommercial
+# licensed: see README "Licensing" for distribution implications.
+erxi = { git = "https://github.com/schachmadinejad/erxi", rev = "4148209c3fb11786ee81b54861e6f6d421905043", default-features = false }
 
 # GUI framework
 eframe = "0.33.3"
