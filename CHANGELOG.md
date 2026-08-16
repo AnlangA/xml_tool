@@ -83,6 +83,16 @@
   icon aliases, and stale `.ftl` keys; README claims trimmed to what the
   UI actually exposes.
 
+### Fixes (round 4 — navigation)
+- F3 / Shift+F3 search navigation now reveals the hit: collapsed ancestors
+  expand, the outline scrolls the row into view, and the node is selected
+  so the inspector follows (previously the hit stayed invisible).
+- Search hits are invalidated when the document is edited, not only when
+  the query text changes — no more stale highlights on dead nodes.
+- Jump hints (`source_jump`) and scroll requests are bound to their
+  session: switching or closing tabs no longer shows a line hint on the
+  wrong document, and jumps from alerts of closed tabs are dropped.
+
 ### Cleanup
 - Removed the unused `egui_extras` dependency and the legacy
   `ui::xml_tree`/`cache` modules (~840 lines of dead code); the tree

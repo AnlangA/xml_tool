@@ -101,11 +101,14 @@ pub struct AppShell {
     pub alerts: crate::ui::alerts::AlertCenter,
     /// Whether the problems panel is expanded.
     pub problems_panel_open: bool,
-    /// Pending jump target (1-based line, column) for the source pane.
-    pub source_jump: Option<(usize, usize)>,
+    /// Pending jump target (1-based line, column) for the source pane,
+    /// bound to its session so it never shows on the wrong tab.
+    pub source_jump: Option<(SessionId, usize, usize)>,
     /// One-shot scroll request paired with the jump (consumed by the
     /// source pane after it scrolls the target line into view).
-    pub pending_scroll: Option<(usize, usize)>,
+    pub pending_scroll: Option<(SessionId, usize, usize)>,
+    /// One-shot outline scroll target (search-hit reveal).
+    pub outline_scroll_to: Option<NodeId>,
     /// Search state for the active session.
     pub search: panels::SearchState,
     pub(crate) pending_new_attr: bool,
@@ -150,6 +153,7 @@ impl AppShell {
             problems_panel_open: false,
             source_jump: None,
             pending_scroll: None,
+            outline_scroll_to: None,
             search: panels::SearchState::default(),
             pending_new_attr: false,
             pending_remove_attr: None,
@@ -229,6 +233,69 @@ impl AppShell {
         }
     }
 
+    /// F3 / Shift+F3: move to the next/previous hit and make it visible —
+    /// expand collapsed ancestors, scroll the outline to the row, and
+    /// select the node so the inspector follows.
+    pub(crate) fn jump_to_search_hit(&mut self, next: bool) {
+        if next {
+            self.search.jump_next();
+        } else {
+            self.search.jump_previous();
+        }
+        let Some(hit) = self.search.selected_node() else {
+            return;
+        };
+        let Some(session_id) = self.workspace.active_id() else {
+            return;
+        };
+        // Expand every ancestor so the hit row exists in the outline.
+        if let Some(session) = self.workspace.active() {
+            let mut ancestors = Vec::new();
+            let mut node = hit;
+            while let Some(parent) = session.document.parent(node) {
+                if parent == NodeId::DOCUMENT {
+                    break;
+                }
+                ancestors.push(parent);
+                node = parent;
+            }
+            self.expanded
+                .entry(session_id)
+                .or_default()
+                .extend(ancestors);
+        }
+        if let Some(session) = self.workspace.active_mut() {
+            session.selection = Some(hit);
+        }
+        self.outline_scroll_to = Some(hit);
+    }
+
+    /// Keeps search hits and jump targets consistent with the active
+    /// session: edits or tab switches rebuild the search, and jump
+    /// hints/scrolls bound to another (or a closed) tab are dropped.
+    pub(crate) fn invalidate_session_scoped_state(&mut self) {
+        let active_id = self.workspace.active_id();
+        let active_revision = self
+            .workspace
+            .active()
+            .map(|session| session.document.revision().0);
+        if self.search.session != active_id || self.search.revision != active_revision {
+            self.search.session = active_id;
+            self.search.revision = active_revision;
+            self.refresh_search();
+        }
+        if let Some((session, _, _)) = self.source_jump
+            && Some(session) != active_id
+        {
+            self.source_jump = None;
+        }
+        if let Some((session, _, _)) = self.pending_scroll
+            && Some(session) != active_id
+        {
+            self.pending_scroll = None;
+        }
+    }
+
     /// Runs one frame.
     pub fn update(&mut self, ctx: &Context) {
         self.apply_preferences_once(ctx);
@@ -237,15 +304,12 @@ impl AppShell {
         self.poll_file_watcher();
         self.maybe_snapshot_recovery();
         self.frames.record("background-poll", started.elapsed());
-        // Search hits are session-scoped; switching tabs rebuilds them.
-        let active_id = self.workspace.active_id();
-        if self.search.session != active_id {
-            self.search.session = active_id;
-            self.refresh_search();
-        }
+        // Search hits are session- and revision-scoped; switching tabs or
+        // editing the document rebuilds them.
+        self.invalidate_session_scoped_state();
         // Alerts stamped from here on belong to this session (jump-to-source
         // switches back to the owning tab).
-        self.alerts.session = active_id;
+        self.alerts.session = self.workspace.active_id();
         self.handle_shortcuts(ctx);
 
         if self.alerts.panel_requested {
@@ -1085,10 +1149,10 @@ impl AppShell {
             self.focus = FocusPane::Outline;
         }
         if wants(KeyboardShortcut::new(Modifiers::NONE, Key::F3)) {
-            self.search.jump_next();
+            self.jump_to_search_hit(true);
         }
         if wants(KeyboardShortcut::new(Modifiers::SHIFT, Key::F3)) {
-            self.search.jump_previous();
+            self.jump_to_search_hit(false);
         }
         if wants(KeyboardShortcut::new(Modifiers::NONE, Key::F6)) {
             self.focus = match self.focus {
@@ -1926,10 +1990,60 @@ mod alert_tests {
         );
         let alert = &shell.alerts.alerts()[0];
         assert_eq!(alert.position, Some((3, 7)));
-        // The panel turns positions into jump targets.
-        shell.source_jump = alert.position;
+        // The panel turns positions into session-bound jump targets.
+        let owner = alert.session.unwrap_or(SessionId(0));
+        shell.source_jump = alert.position.map(|(line, column)| (owner, line, column));
         shell.focus = FocusPane::Source;
-        assert_eq!(shell.source_jump, Some((3, 7)));
+        assert_eq!(shell.source_jump, Some((owner, 3, 7)));
         assert_eq!(shell.focus, FocusPane::Source);
+    }
+
+    #[test]
+    fn f3_reveal_expands_ancestors_selects_and_marks_scroll() {
+        let mut shell = AppShell::new();
+        shell.new_document();
+        let session_id = shell.workspace.active_id().expect("active");
+        assert!(shell.commit(Command::ReplaceWholeSource {
+            new_source: String::from("<r><a><needle/></a></r>"),
+        }));
+
+        shell.search.needle = String::from("needle");
+        shell.refresh_search();
+        assert_eq!(shell.search.hits.len(), 1);
+
+        // Outline starts fully collapsed: the hit row is not even rendered.
+        shell.jump_to_search_hit(true);
+        let hit = shell.search.selected_node().expect("hit");
+        let session = shell.workspace.active().expect("active");
+        assert_eq!(session.selection, Some(hit), "jump selects the hit node");
+        let expanded = shell.expanded.get(&session_id).expect("expansion state");
+        let root = session.document.root_element().expect("root");
+        let a = shell
+            .workspace
+            .active()
+            .expect("active")
+            .document
+            .children(root)[0];
+        assert!(expanded.contains(&root), "root expanded");
+        assert!(expanded.contains(&a), "middle ancestor expanded");
+        assert_eq!(
+            shell.outline_scroll_to,
+            Some(hit),
+            "outline scrolls to the revealed row"
+        );
+    }
+
+    #[test]
+    fn jump_hints_clear_when_switching_sessions() {
+        let mut shell = AppShell::new();
+        shell.new_document();
+        let first = shell.workspace.active_id().expect("first");
+        shell.source_jump = Some((first, 4, 2));
+        shell.new_document();
+        let second = shell.workspace.active_id().expect("second");
+        assert_ne!(first, second);
+        // The hint belongs to the first tab: it must not follow the switch.
+        shell.invalidate_session_scoped_state();
+        assert!(shell.source_jump.is_none(), "stale jump hint cleared");
     }
 }
