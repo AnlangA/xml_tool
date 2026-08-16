@@ -169,32 +169,47 @@ impl History {
     }
 
     /// Undoes the most recent command. Returns the change set of the
-    /// reversal, or `None` when there is nothing to undo.
+    /// reversal, or `None` when there is nothing to undo. A failed reversal
+    /// keeps the entry on the stack instead of silently dropping history.
     pub fn undo(&mut self, document: &mut XmlDocument) -> Option<ChangedSet> {
         let entry = self.undo.pop()?;
-        let (reverse_of_reverse, changed) = entry.reverse.apply(document).ok()?;
-        self.redo.push(HistoryEntry {
-            forward: entry.forward,
-            reverse: reverse_of_reverse,
-            coalesce_key: entry.coalesce_key,
-            committed_at: entry.committed_at,
-            estimated_bytes: entry.estimated_bytes,
-        });
-        Some(changed)
+        match entry.reverse.apply(document) {
+            Ok((reverse_of_reverse, changed)) => {
+                self.redo.push(HistoryEntry {
+                    forward: entry.forward,
+                    reverse: reverse_of_reverse,
+                    coalesce_key: entry.coalesce_key,
+                    committed_at: entry.committed_at,
+                    estimated_bytes: entry.estimated_bytes,
+                });
+                Some(changed)
+            }
+            Err(_) => {
+                self.undo.push(entry);
+                None
+            }
+        }
     }
 
     /// Redoes the most recently undone command.
     pub fn redo(&mut self, document: &mut XmlDocument) -> Option<ChangedSet> {
         let entry = self.redo.pop()?;
-        let (reverse_of_forward, changed) = entry.forward.apply(document).ok()?;
-        self.undo.push(HistoryEntry {
-            forward: entry.forward,
-            reverse: reverse_of_forward,
-            coalesce_key: entry.coalesce_key,
-            committed_at: (self.clock.now)(),
-            estimated_bytes: entry.estimated_bytes,
-        });
-        Some(changed)
+        match entry.forward.apply(document) {
+            Ok((reverse_of_forward, changed)) => {
+                self.undo.push(HistoryEntry {
+                    forward: entry.forward,
+                    reverse: reverse_of_forward,
+                    coalesce_key: entry.coalesce_key,
+                    committed_at: (self.clock.now)(),
+                    estimated_bytes: entry.estimated_bytes,
+                });
+                Some(changed)
+            }
+            Err(_) => {
+                self.redo.push(entry);
+                None
+            }
+        }
     }
 
     /// Drops all history (used by reload/discard flows).

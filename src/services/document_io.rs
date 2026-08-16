@@ -161,6 +161,10 @@ pub fn save_bytes_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     save_bytes_with_hooks(path, bytes, &mut NoHooks)
 }
 
+/// Process-wide counter making temp file names unique across concurrent
+/// saves of the same target (two in-flight saves must not share a temp).
+static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Failure-injection hooks used by tests to prove the atomic sequence.
 pub trait SaveHooks {
     /// Called after the temp file is fully written and synced, before the
@@ -186,7 +190,12 @@ pub fn save_bytes_with_hooks(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| String::from("document"));
-    let temp: PathBuf = directory.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+    let temp: PathBuf = directory.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
 
     let mut write = || -> std::io::Result<()> {
         let mut file = fs::File::create(&temp)?;

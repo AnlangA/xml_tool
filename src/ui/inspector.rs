@@ -7,9 +7,9 @@ use crate::core::{Command, NewNode, NodeContent};
 use crate::core::{InsertPosition, QNameSpec};
 use crate::services::workspace::DocumentMode;
 use crate::ui::icons::Icons;
-use crate::ui::panels::INSPECTOR_WIDTH;
+use crate::ui::panels::{INSPECTOR_WIDTH, panel_heading, section_label};
 use crate::ui::shell::{AppShell, Dialog};
-use crate::ui::theme::Theme;
+use crate::ui::theme::Palette;
 
 // ---------------------------------------------------------------------------
 // Right: inspector
@@ -31,22 +31,30 @@ pub fn inspector_panel(ctx: &Context, shell: &mut AppShell, drawer: bool) {
 }
 
 pub fn inspector_contents(ui: &mut Ui, shell: &mut AppShell) {
-    ui.heading(shell.localization.msg("panel-inspector"));
+    panel_heading(
+        ui,
+        Icons::SLIDERS_HORIZONTAL,
+        shell.localization.msg("panel-inspector"),
+    );
+    let pal = Palette::resolve(ui.ctx());
     let Some(session) = shell.workspace.active() else {
-        ui.label(shell.localization.msg("panel-empty"));
+        ui.label(RichText::new(shell.localization.msg("panel-empty")).color(pal.text_muted));
         return;
     };
     if session.mode == DocumentMode::LargeReadOnly {
         ui.label(shell.localization.msg("inspector-read-only"));
     }
     let Some(node) = shell.workspace.active().and_then(|s| s.selection) else {
-        ui.label(shell.localization.msg("inspector-no-selection"));
+        ui.label(
+            RichText::new(shell.localization.msg("inspector-no-selection")).color(pal.text_muted),
+        );
         return;
     };
     inspector_body(ui, shell, node);
 }
 
 fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
+    let pal = Palette::resolve(ui.ctx());
     let editable = shell
         .workspace
         .active()
@@ -67,7 +75,7 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
         let document = &session.document;
         match document.kind(node) {
             Some(XmlNodeKind::Element) => {
-                ui.label(shell.localization.msg("inspector-qname"));
+                section_label(ui, shell.localization.msg("inspector-qname"));
                 let current = document.qname(node).map(|q| q.render()).unwrap_or_default();
                 let mut value = current.clone();
                 ui.add(TextEdit::singleline(&mut value).desired_width(f32::INFINITY));
@@ -79,16 +87,16 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
                     .qname(node)
                     .and_then(|q| q.namespace_uri().map(str::to_string))
                 {
-                    ui.label(shell.localization.msg("inspector-namespace"));
+                    section_label(ui, shell.localization.msg("inspector-namespace"));
                     ui.monospace(&uri);
                 }
 
                 ui.separator();
-                ui.label(shell.localization.msg("inspector-attributes"));
+                section_label(ui, shell.localization.msg("inspector-attributes"));
                 let mut next_attr_name = 1;
                 for (name, attr_value) in document.attributes(node) {
                     ui.horizontal(|ui| {
-                        ui.monospace(&name);
+                        ui.label(RichText::new(&name).monospace().color(pal.attribute_key));
                         let mut editable_value = attr_value.clone();
                         let response = ui.add(
                             TextEdit::singleline(&mut editable_value)
@@ -145,7 +153,7 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
                             Icons::TRASH,
                             shell.localization.msg("outline-delete")
                         ))
-                        .color(Theme::ERROR),
+                        .color(pal.error),
                     )
                     .clicked()
                 {
@@ -153,11 +161,14 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
                 }
             }
             Some(XmlNodeKind::Text) | Some(XmlNodeKind::CData) => {
-                ui.label(if document.kind(node) == Some(XmlNodeKind::Text) {
-                    shell.localization.msg("inspector-text")
-                } else {
-                    shell.localization.msg("inspector-cdata")
-                });
+                section_label(
+                    ui,
+                    if document.kind(node) == Some(XmlNodeKind::Text) {
+                        shell.localization.msg("inspector-text")
+                    } else {
+                        shell.localization.msg("inspector-cdata")
+                    },
+                );
                 let current = document.node_text(node).unwrap_or_default().to_string();
                 let mut value = current.clone();
                 let response = ui.add(
@@ -170,7 +181,7 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
                 }
             }
             Some(XmlNodeKind::Comment) => {
-                ui.label(shell.localization.msg("inspector-comment"));
+                section_label(ui, shell.localization.msg("inspector-comment"));
                 let current = document.comment_text(node).unwrap_or_default().to_string();
                 let mut value = current.clone();
                 let response = ui.add(
@@ -184,9 +195,9 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
             }
             Some(XmlNodeKind::ProcessingInstruction) => {
                 if let Some((target, data)) = document.pi(node) {
-                    ui.label(shell.localization.msg("inspector-pi-target"));
+                    section_label(ui, shell.localization.msg("inspector-pi-target"));
                     ui.monospace(target);
-                    ui.label(shell.localization.msg("inspector-pi-data"));
+                    section_label(ui, shell.localization.msg("inspector-pi-data"));
                     ui.monospace(data.unwrap_or(""));
                 }
             }
@@ -250,13 +261,22 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
             .qname(node)
             .map(|q| q.render())
             .unwrap_or_default();
-        let descendants = session.document.document_order().len();
+        let descendants = count_descendants(&session.document, node);
         shell.dialog = Some(Dialog::ConfirmDelete {
             node,
             name,
-            descendants: descendants.saturating_sub(1),
+            descendants,
         });
     }
+}
+
+/// Counts the node's subtree descendants (shown in the delete dialog).
+fn count_descendants(document: &crate::core::document::XmlDocument, node: NodeId) -> usize {
+    document
+        .children(node)
+        .into_iter()
+        .map(|child| 1 + count_descendants(document, child))
+        .sum()
 }
 
 fn unique_attribute_name(shell: &AppShell, element: NodeId) -> String {

@@ -1,6 +1,19 @@
-use egui::Color32;
+//! Theme tokens for the shell.
+//!
+//! [`Palette`] resolves the semantic colors for the *current* light/dark
+//! mode from the Catppuccin flavors (Latte/Mocha) that
+//! [`crate::ui::theme_prefs`] installs into egui — custom widgets must use
+//! `Palette::resolve(ctx)` per frame instead of caching colors, so toggling
+//! the theme or following the OS restyles everything immediately.
+//!
+//! The legacy [`Theme`] constants are the frozen Mocha palette kept for the
+//! not-yet-wired `base64_image` module; new code must not use them.
+
+use egui::{Color32, Context};
 
 /// Application color theme based on Catppuccin Mocha.
+///
+/// Legacy dark-only constants; superseded by [`Palette`].
 #[allow(dead_code)]
 pub struct Theme;
 
@@ -84,8 +97,126 @@ impl Theme {
     pub const INFO_BG: Color32 = Color32::from_rgba_premultiplied(137, 180, 250, 30);
 }
 
+/// Re-colors `color` with the given alpha (straight alpha, egui
+/// premultiplies internally).
+fn with_alpha(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+/// Semantic colors resolved for the active light/dark mode.
+///
+/// Obtain it per frame with [`Palette::resolve`]; it is cheap (all fields
+/// are `Copy`).
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    // Semantic colors
+    pub accent: Color32,
+    pub accent_hover: Color32,
+    pub success: Color32,
+    pub warning: Color32,
+    pub error: Color32,
+    pub info: Color32,
+
+    // UI element colors
+    pub panel_bg: Color32,
+    pub card_bg: Color32,
+    pub input_bg: Color32,
+    pub border: Color32,
+    pub selection: Color32,
+
+    // Text colors
+    pub text_primary: Color32,
+    pub text_secondary: Color32,
+    pub text_muted: Color32,
+    pub text_highlight: Color32,
+
+    // Element-specific colors
+    pub element_name: Color32,
+    pub attribute_key: Color32,
+    pub attribute_value: Color32,
+    pub text_content: Color32,
+    pub comment: Color32,
+
+    // Syntax highlighting colors (for the source view)
+    pub syntax_tag: Color32,
+    pub syntax_tag_bracket: Color32,
+    pub syntax_attr_name: Color32,
+    pub syntax_attr_value: Color32,
+    pub syntax_string: Color32,
+    pub syntax_comment: Color32,
+    pub syntax_text: Color32,
+    pub syntax_keyword: Color32,
+
+    // Interactive states
+    pub hover_bg: Color32,
+    pub active_bg: Color32,
+    pub focus_border: Color32,
+
+    // Status backgrounds
+    pub success_bg: Color32,
+    pub warning_bg: Color32,
+    pub error_bg: Color32,
+    pub info_bg: Color32,
+}
+
+impl Palette {
+    /// Resolves the palette for the context's current theme.
+    pub fn resolve(ctx: &Context) -> Palette {
+        match ctx.theme() {
+            egui::Theme::Light => Self::from_flavor(&catppuccin_egui::LATTE),
+            egui::Theme::Dark => Self::from_flavor(&catppuccin_egui::MOCHA),
+        }
+    }
+
+    /// Maps a Catppuccin flavor onto the semantic slots.
+    fn from_flavor(flavor: &catppuccin_egui::Theme) -> Palette {
+        Palette {
+            accent: flavor.lavender,
+            accent_hover: flavor.blue,
+            success: flavor.green,
+            warning: flavor.yellow,
+            error: flavor.red,
+            info: flavor.sky,
+
+            panel_bg: flavor.mantle,
+            card_bg: flavor.surface0,
+            input_bg: flavor.surface1,
+            border: flavor.surface1,
+            selection: with_alpha(flavor.blue, 48),
+
+            text_primary: flavor.text,
+            text_secondary: flavor.subtext0,
+            text_muted: flavor.overlay0,
+            text_highlight: flavor.lavender,
+
+            element_name: flavor.green,
+            attribute_key: flavor.yellow,
+            attribute_value: flavor.peach,
+            text_content: flavor.text,
+            comment: flavor.overlay2,
+
+            syntax_tag: flavor.green,
+            syntax_tag_bracket: flavor.overlay1,
+            syntax_attr_name: flavor.yellow,
+            syntax_attr_value: flavor.peach,
+            syntax_string: flavor.peach,
+            syntax_comment: flavor.overlay0,
+            syntax_text: flavor.text,
+            syntax_keyword: flavor.mauve,
+
+            hover_bg: with_alpha(flavor.text, 12),
+            active_bg: with_alpha(flavor.text, 24),
+            focus_border: flavor.lavender,
+
+            success_bg: with_alpha(flavor.green, 30),
+            warning_bg: with_alpha(flavor.yellow, 30),
+            error_bg: with_alpha(flavor.red, 30),
+            info_bg: with_alpha(flavor.sky, 30),
+        }
+    }
+}
+
 /// Spacing constants for consistent layout
-#[allow(dead_code)]
 pub struct Spacing;
 
 #[allow(dead_code)]
@@ -100,7 +231,6 @@ impl Spacing {
 }
 
 /// Typography constants
-#[allow(dead_code)]
 pub struct Typography;
 
 #[allow(dead_code)]
@@ -112,4 +242,22 @@ impl Typography {
     pub const SMALL: f32 = 12.0;
     pub const TINY: f32 = 10.0;
     pub const CODE: f32 = 12.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_follows_the_context_theme() {
+        let ctx = Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let dark = Palette::resolve(&ctx);
+        assert_eq!(dark.error, catppuccin_egui::MOCHA.red);
+
+        ctx.set_theme(egui::ThemePreference::Light);
+        let light = Palette::resolve(&ctx);
+        assert_eq!(light.error, catppuccin_egui::LATTE.red);
+        assert_ne!(dark.text_primary, light.text_primary);
+    }
 }

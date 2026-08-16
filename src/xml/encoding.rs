@@ -213,10 +213,16 @@ fn declared_encoding(text: &str) -> Option<&str> {
         };
         let tail = &prolog[start + "encoding".len()..];
         let tail = tail.trim_start();
-        let tail = tail.strip_prefix('=')?;
+        let Some(tail) = tail.strip_prefix('=') else {
+            continue;
+        };
         let tail = tail.trim_start();
-        let value = tail.strip_prefix(quote)?;
-        let value_end = value.find(quote)?;
+        let Some(value) = tail.strip_prefix(quote) else {
+            continue; // try the other quote style
+        };
+        let Some(value_end) = value.find(quote) else {
+            continue;
+        };
         return Some(&value[..value_end]);
     }
     None
@@ -330,5 +336,14 @@ mod tests {
     fn accepts_single_quoted_encoding_declaration() {
         let (..) =
             decode_xml_source("<?xml version='1.0' encoding='utf-8'?><a/>".as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn rejects_single_quoted_utf16_declaration_over_utf8_bytes() {
+        // Single quotes must not smuggle a mismatched declaration past
+        // verification (previously the first-quote `?` aborted the scan).
+        let err = decode_xml_source("<?xml version='1.0' encoding='UTF-16'?><a/>".as_bytes())
+            .unwrap_err();
+        assert_eq!(err.code(), XmlErrorCode::EncodingMismatch);
     }
 }

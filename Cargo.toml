@@ -21,7 +21,6 @@ erxi = { git = "https://github.com/schachmadinejad/erxi", rev = "4148209c3fb1178
 # GUI framework
 eframe = "0.33.3"
 egui = "0.33.3"
-egui_extras = { version = "0.33.3", features = ["image"] }
 
 # Base64 image previews
 base64 = "0.22"

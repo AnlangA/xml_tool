@@ -502,6 +502,31 @@ fn delete_node_success_fail_undo_redo() {
 }
 
 #[test]
+fn delete_top_level_comment_undoes_cleanly() {
+    // Top-level nodes restore under DOCUMENT, not an element parent —
+    // this used to fail undo with `not_an_element` and drop the entry.
+    let mut doc = parse("<!--top--><r><a/></r><!--tail-->");
+    let mut history = History::new();
+    let top = doc
+        .children(NodeId::DOCUMENT)
+        .into_iter()
+        .find(|id| doc.kind(*id) == Some(XmlNodeKind::Comment))
+        .expect("top-level comment");
+
+    commit(&mut doc, &mut history, Command::DeleteNode { node: top });
+    assert_eq!(doc.source(), "<r><a/></r><!--tail-->");
+    assert_source_matches_dom(&doc);
+
+    history.undo(&mut doc).expect("undo top-level restore");
+    assert_eq!(doc.source(), "<!--top--><r><a/></r><!--tail-->");
+    assert_source_matches_dom(&doc);
+
+    history.redo(&mut doc).expect("redo");
+    assert_eq!(doc.source(), "<r><a/></r><!--tail-->");
+    assert_source_matches_dom(&doc);
+}
+
+#[test]
 fn delete_subtree_removes_descendants_too() {
     let mut doc = parse("<r><parent><x>1</x><y>2</y></parent><tail/></r>");
     let mut history = History::new();

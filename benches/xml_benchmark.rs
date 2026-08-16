@@ -1,7 +1,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use xml_tool::exi::{decode_exi_to_xml, encode_xml_to_exi};
 use xml_tool::ui::syntax_highlighter::SyntaxHighlighter;
-use xml_tool::ui::xml_tree::XmlTreeView;
+use xml_tool::ui::theme::Palette;
 use xml_tool::xml::{parse_xml, serialize_xml};
 
 fn generate_xml(depth: usize, breadth: usize) -> String {
@@ -121,25 +121,21 @@ fn bench_real_world_xml(c: &mut Criterion) {
 
 fn bench_tree_search(c: &mut Criterion) {
     let xml = generate_xml(5, 5);
-    let doc = parse_xml(&xml).unwrap();
+    let doc = XmlDocument::parse(xml.as_bytes()).expect("parse");
+    let order = doc.document_order().to_vec();
     let mut group = c.benchmark_group("tree_search");
 
     group.bench_function("cold_leaf_query", |b| {
         b.iter_batched(
-            XmlTreeView::new,
-            |mut view| {
-                black_box(view.search_match_count(doc.root.as_ref(), doc.version(), "leaf", false))
-            },
+            || SearchIndex::build(&doc),
+            |mut index| black_box(index.search("leaf", false, &order).len()),
             BatchSize::SmallInput,
         )
     });
 
-    let mut warm_view = XmlTreeView::new();
-    warm_view.search_match_count(doc.root.as_ref(), doc.version(), "leaf", false);
+    let mut warm_index = SearchIndex::build(&doc);
     group.bench_function("warm_leaf_query", |b| {
-        b.iter(|| {
-            black_box(warm_view.search_match_count(doc.root.as_ref(), doc.version(), "leaf", false))
-        })
+        b.iter(|| black_box(warm_index.search("leaf", false, &order).len()))
     });
 
     group.finish();
@@ -148,9 +144,10 @@ fn bench_tree_search(c: &mut Criterion) {
 fn bench_highlight_xml(c: &mut Criterion) {
     let xml = generate_xml(5, 5);
     let highlighter = SyntaxHighlighter::new();
+    let palette = bench_palette();
 
     c.bench_function("highlight_large_xml", |b| {
-        b.iter(|| black_box(highlighter.highlight_xml_lines(black_box(&xml))))
+        b.iter(|| black_box(highlighter.highlight_xml_lines(black_box(&palette), black_box(&xml))))
     });
 }
 
@@ -297,9 +294,12 @@ fn bench_visible_highlight(c: &mut Criterion) {
         .collect::<Vec<_>>()
         .join("\n");
     let highlighter = SyntaxHighlighter::new();
+    let palette = bench_palette();
     let mut group = c.benchmark_group("highlight");
     group.bench_function("visible_200_lines", |b| {
-        b.iter(|| black_box(highlighter.highlight_xml_lines(black_box(&window))))
+        b.iter(|| {
+            black_box(highlighter.highlight_xml_lines(black_box(&palette), black_box(&window)))
+        })
     });
     group.finish();
 }
@@ -339,3 +339,11 @@ criterion_group!(
     bench_exi_presets
 );
 criterion_main!(benches, step9_benches);
+
+/// A fixed dark palette for highlighting benchmarks (theme resolution is
+/// not the hot path being measured).
+fn bench_palette() -> Palette {
+    let ctx = egui::Context::default();
+    ctx.set_theme(egui::ThemePreference::Dark);
+    Palette::resolve(&ctx)
+}

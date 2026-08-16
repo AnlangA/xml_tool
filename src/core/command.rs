@@ -899,7 +899,9 @@ fn apply_set_node_content(
                     dom.node_kind_mut(node.to_engine())
                 {
                     pi.target = target.clone().into();
-                    pi.data = Some(data.clone().unwrap_or_default().into());
+                    // Preserve `None`: `<?pi?>` and `<?pi ?>` (empty data)
+                    // are different spellings.
+                    pi.data = data.clone().map(Into::into);
                 }
             }
         }
@@ -1500,8 +1502,13 @@ fn apply_restore_node(
     offset: usize,
     bytes: &str,
 ) -> Result<(Command, ChangedSet), CommandError> {
-    require_element(document, parent)?;
-    let was_childless = document.children(parent).is_empty();
+    // Top-level nodes (comments/PIs, or the root) restore under DOCUMENT;
+    // everything else needs an element parent.
+    let parent_is_document = parent == NodeId::DOCUMENT;
+    if !parent_is_document {
+        require_element(document, parent)?;
+    }
+    let was_childless = !parent_is_document && document.children(parent).is_empty();
     let sibling = position_sibling(document, parent, position)?;
 
     // Descendants kept stale (but original, LIFO-consistent) range entries;
