@@ -38,6 +38,10 @@ const APPLY_SESSION: SessionId = SessionId(u64::MAX - 2);
 /// Modal dialogs the shell can show.
 pub enum Dialog {
     About,
+    /// XPath query entry (expression buffer).
+    XPathQuery {
+        expression: String,
+    },
     ConfirmDelete {
         node: NodeId,
         name: String,
@@ -672,6 +676,131 @@ impl AppShell {
                     .with_argument("line", line.to_string())
                     .with_argument("column", column.to_string());
                 self.problems.push(diagnostic);
+            }
+        }
+    }
+
+    /// Opens the XPath query dialog.
+    pub fn run_xpath_dialog(&mut self) {
+        self.dialog = Some(Dialog::XPathQuery {
+            expression: String::new(),
+        });
+    }
+
+    /// Executes an XPath expression; results land in the Problems panel.
+    pub fn execute_xpath(&mut self, expression: &str) {
+        let Some(session) = self.workspace.active() else {
+            return;
+        };
+        match crate::services::xpath::query(&session.document, expression) {
+            Ok(crate::services::xpath::XPathOutcome::NodeSet(nodes)) => {
+                let text = self.localization.msg_with(
+                    "xpath-result-nodes",
+                    Some(&crate::fluent_args!("count" => nodes.len() as i32)),
+                );
+                self.push_problem(crate::core::Severity::Info, "xpath", text);
+            }
+            Ok(crate::services::xpath::XPathOutcome::String(value)) => {
+                self.push_problem(crate::core::Severity::Info, "xpath", value);
+            }
+            Ok(crate::services::xpath::XPathOutcome::Number(value)) => {
+                self.push_problem(crate::core::Severity::Info, "xpath", value.to_string());
+            }
+            Ok(crate::services::xpath::XPathOutcome::Boolean(value)) => {
+                self.push_problem(crate::core::Severity::Info, "xpath", value.to_string());
+            }
+            Err(err) => {
+                self.push_problem(crate::core::Severity::Error, "xpath", err.to_string());
+            }
+        }
+    }
+
+    /// XSD validation: pick a schema, validate, report diagnostics.
+    pub fn run_validation_dialog(&mut self) {
+        let Some(schema_path) = rfd::FileDialog::new()
+            .add_filter("XSD", &["xsd"])
+            .pick_file()
+        else {
+            return;
+        };
+        match crate::services::validation::compile_schema(&schema_path) {
+            Ok(validator) => {
+                let Some(session) = self.workspace.active() else {
+                    return;
+                };
+                for diagnostic in
+                    crate::services::validation::validate(&session.document, &validator)
+                {
+                    let mut rendered = diagnostic.message_key.clone();
+                    if let (Some(line), Some(column)) = (
+                        diagnostic.arguments.get("line"),
+                        diagnostic.arguments.get("column"),
+                    ) {
+                        rendered.push_str(&format!(" ({line}:{column})"));
+                    }
+                    self.push_problem(diagnostic.severity, &diagnostic.code, rendered);
+                }
+                if self.problems.is_empty() {
+                    self.push_problem(crate::core::Severity::Info, "xsd", String::from("valid"));
+                }
+            }
+            Err(err) => {
+                self.push_problem(crate::core::Severity::Error, "xsd", err.to_string());
+            }
+        }
+    }
+
+    /// Structural diff against a file on disk.
+    pub fn run_diff_dialog(&mut self) {
+        let Some(other_path) = rfd::FileDialog::new()
+            .add_filter("XML", &["xml"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&other_path) else {
+            return;
+        };
+        let Ok(other) = XmlDocument::parse(&bytes) else {
+            self.push_problem(
+                Severity::Error,
+                "diff",
+                self.localization.msg("error-parse-failed"),
+            );
+            return;
+        };
+        let Some(session) = self.workspace.active() else {
+            return;
+        };
+        match crate::services::diff::diff_xml(
+            &session.document,
+            &other,
+            crate::services::diff::DiffOptions::default(),
+        ) {
+            Ok(entries) if entries.is_empty() => {
+                self.push_problem(
+                    crate::core::Severity::Info,
+                    "diff",
+                    String::from("identical"),
+                );
+            }
+            Ok(entries) => {
+                for entry in &entries {
+                    let (tag, label) = match entry {
+                        crate::services::diff::DiffEntry::Added { label } => ("+", label),
+                        crate::services::diff::DiffEntry::Removed { label } => ("-", label),
+                        crate::services::diff::DiffEntry::Modified { label, .. } => ("~", label),
+                        crate::services::diff::DiffEntry::Moved { label } => (">", label),
+                    };
+                    self.push_problem(
+                        crate::core::Severity::Info,
+                        "diff",
+                        format!("{tag} {label}"),
+                    );
+                }
+            }
+            Err(err) => {
+                self.push_problem(Severity::Error, "diff", err);
             }
         }
     }

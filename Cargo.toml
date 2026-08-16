@@ -59,6 +59,9 @@ notify = "8.2.0"
 # Rope-based source buffers (clones share the underlying tree)
 ropey = "1.6.1"
 
+# Sequence diff for structural XML comparison
+similar = "=3.1.1"
+
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.27"

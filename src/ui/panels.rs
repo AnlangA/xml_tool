@@ -157,6 +157,18 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
                     indent: "  ".to_string(),
                 });
             }
+            if ui.button(shell.localization.msg("action-xpath")).clicked() {
+                shell.run_xpath_dialog();
+            }
+            if ui
+                .button(shell.localization.msg("action-validate-with"))
+                .clicked()
+            {
+                shell.run_validation_dialog();
+            }
+            if ui.button(shell.localization.msg("action-diff")).clicked() {
+                shell.run_diff_dialog();
+            }
         });
         ui.menu_button(shell.localization.msg("menu-exi"), |ui| {
             if ui

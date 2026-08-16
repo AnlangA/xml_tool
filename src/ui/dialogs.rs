@@ -40,6 +40,7 @@ pub fn dialogs(ctx: &Context, shell: &mut AppShell) {
 fn title_key(dialog: &Dialog) -> &'static str {
     match dialog {
         Dialog::About => "dialog-about-title",
+        Dialog::XPathQuery { .. } => "action-xpath",
         Dialog::ConfirmDelete { .. } => "dialog-delete-title",
         Dialog::UnsavedExit => "dialog-unsaved-title",
         Dialog::ReloadBanner { .. } => "dialog-reload-title",
@@ -75,6 +76,20 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
             if ui.button("OK").clicked() {
                 *keep = false;
             }
+        }
+        Dialog::XPathQuery { expression } => {
+            let mut buffer = expression.clone();
+            ui.add(egui::TextEdit::singleline(&mut buffer).hint_text("//element[@attr='value']"));
+            ui.horizontal(|ui| {
+                if ui.button("XPath").clicked() {
+                    shell.execute_xpath(&buffer);
+                    *keep = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    *keep = false;
+                }
+            });
+            *expression = buffer;
         }
         Dialog::ConfirmDelete {
             node,

@@ -105,6 +105,87 @@ fn element_to_json(elem: &XmlElement) -> Value {
     Value::Object(obj)
 }
 
+/// The lossless export mode: an ordered node array preserving QName,
+/// namespace URI, attributes, Text, CDATA, comments, and PIs exactly — a
+/// `kind`-tagged tree that can be walked back in document order.
+///
+/// The legacy [`export_to_json`] mapping (`@attributes`/`@text`/`@content`)
+/// stays untouched for compatibility.
+pub fn export_to_json_lossless(doc: &crate::core::document::XmlDocument) -> Result<String> {
+    let Some(root) = doc.root_element() else {
+        anyhow::bail!("document has no root element");
+    };
+    let tree = lossless_node(doc, root);
+    Ok(serde_json::to_string_pretty(&tree)?)
+}
+
+fn lossless_node(doc: &crate::core::document::XmlDocument, node: crate::core::NodeId) -> Value {
+    use crate::core::XmlNodeKind;
+
+    let mut object = serde_json::Map::new();
+    match doc.kind(node) {
+        Some(XmlNodeKind::Element) => {
+            object.insert("kind".into(), json!("element"));
+            if let Some(qname) = doc.qname(node) {
+                object.insert("name".into(), json!(qname.render()));
+                if let Some(uri) = qname.namespace_uri() {
+                    object.insert("namespace".into(), json!(uri));
+                }
+            }
+            let attributes: Vec<Value> = doc
+                .attributes(node)
+                .into_iter()
+                .map(|(name, value)| json!({ "name": name, "value": value }))
+                .collect();
+            if !attributes.is_empty() {
+                object.insert("attributes".into(), Value::Array(attributes));
+            }
+            let children: Vec<Value> = doc
+                .children(node)
+                .into_iter()
+                .map(|child| lossless_node(doc, child))
+                .collect();
+            if !children.is_empty() {
+                object.insert("children".into(), Value::Array(children));
+            }
+        }
+        Some(XmlNodeKind::Text) => {
+            object.insert("kind".into(), json!("text"));
+            object.insert(
+                "text".into(),
+                json!(doc.node_text(node).unwrap_or_default()),
+            );
+        }
+        Some(XmlNodeKind::CData) => {
+            object.insert("kind".into(), json!("cdata"));
+            object.insert(
+                "text".into(),
+                json!(doc.node_text(node).unwrap_or_default()),
+            );
+        }
+        Some(XmlNodeKind::Comment) => {
+            object.insert("kind".into(), json!("comment"));
+            object.insert(
+                "text".into(),
+                json!(doc.comment_text(node).unwrap_or_default()),
+            );
+        }
+        Some(XmlNodeKind::ProcessingInstruction) => {
+            object.insert("kind".into(), json!("pi"));
+            if let Some((target, data)) = doc.pi(node) {
+                object.insert("target".into(), json!(target));
+                if let Some(data) = data {
+                    object.insert("data".into(), json!(data));
+                }
+            }
+        }
+        _ => {
+            object.insert("kind".into(), json!("other"));
+        }
+    }
+    Value::Object(object)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,16 +7,20 @@
 //! only when the `JobId + SessionId + Revision` triple still matches the
 //! live document, so stale completions can never clobber newer edits.
 
+pub mod diff;
 pub mod document_io;
 pub mod large_file;
 pub mod outline;
 pub mod recovery;
+pub mod replace;
 pub mod search;
 pub mod source_buffer;
 pub mod source_editor;
 pub mod task_manager;
+pub mod validation;
 pub mod watcher;
 pub mod workspace;
+pub mod xpath;
 
 pub use document_io::{OpenOutcome, save_bytes_atomically};
 pub use recovery::{RecoverySnapshot, RecoveryStore};
