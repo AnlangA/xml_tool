@@ -35,8 +35,13 @@ catppuccin-egui = { version = "5.7.0", default-features = false, features = ["eg
 parking_lot = "0.12"
 lru = "0.18"
 
-# Icons
-egui-phosphor = { version = "0.7", optional = true }
+# Icons (icon-name constants only; font loading is ours)
+egui-phosphor = "=0.11.0"
+
+# Runtime localization (Fluent)
+fluent-bundle = "0.16.0"
+unic-langid = "0.9"
+sys-locale = "0.3"
 
 # Export formats
 serde_json = "1.0"
@@ -56,7 +61,8 @@ ropey = "1.6.1"
 
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3.13"
+tempfile = "3.27"
+egui_kittest = { version = "0.33.3", features = ["snapshot", "wgpu"] }
 
 [profile.release]
 opt-level = 3

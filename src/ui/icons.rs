@@ -1,64 +1,32 @@
-//! Icon constants using Unicode symbols and `egui_phosphor`.
+//! Iconography: Phosphor icons loaded with the bundled font.
 //!
-//! This module centralizes the iconography used across the application.
-//! It mixes broadly supported Unicode symbols with optional Phosphor icons.
+//! Every icon button renders a Phosphor glyph (font installed by
+//! [`crate::ui::fonts`]); the emoji fallbacks are gone, so icon rendering
+//! is identical across platforms.
 
+use egui_phosphor::variants::regular;
+
+/// Icon glyphs used by the shell.
 pub struct Icons;
 
 impl Icons {
-    // File operations
-    pub const FILE: &'static str = "📄";
-    pub const FOLDER_OPEN: &'static str = "📂";
-    pub const SAVE: &'static str = "💾";
-
-    // Actions
-    pub const SEARCH: &'static str = "🔍";
-    pub const EDIT: &'static str = "✏️";
-    pub const DELETE: &'static str = "🗑️";
-    pub const ADD: &'static str = "➕";
-    pub const CLOSE: &'static str = "✕";
-
-    // Navigation
-    pub const EXPAND: &'static str = "▶";
-    pub const COLLAPSE: &'static str = "▼";
-    pub const ARROW_RIGHT: &'static str = "→";
-    pub const ARROW_LEFT: &'static str = "←";
-
-    // Status
-    pub const SUCCESS: &'static str = "✓";
-    pub const ERROR: &'static str = "✗";
-    pub const WARNING: &'static str = "⚠";
-    pub const INFO: &'static str = "ℹ";
-
-    // Tools
-    pub const COMPRESS: &'static str = "▶";
-    pub const DECOMPRESS: &'static str = "◀";
-    pub const REFRESH: &'static str = "🔄";
-    pub const SETTINGS: &'static str = "⚙";
-
-    // XML specific
-    pub const XML_TAG: &'static str = "<>";
-    pub const ATTRIBUTE: &'static str = "@";
-    pub const TEXT_NODE: &'static str = "\"\"";
-    pub const COMMENT: &'static str = "💬";
+    pub const FILE_PLUS: &'static str = regular::FILE_PLUS;
+    pub const FOLDER_OPEN: &'static str = regular::FOLDER_OPEN;
+    pub const FLOPPY_DISK: &'static str = regular::FLOPPY_DISK;
+    pub const MAGIC_WAND: &'static str = regular::MAGIC_WAND;
+    pub const TRASH: &'static str = regular::TRASH;
+    pub const MAGNIFYING_GLASS: &'static str = regular::MAGNIFYING_GLASS;
+    pub const ARROW_CLOCKWISE: &'static str = regular::ARROW_CLOCKWISE;
+    pub const GEAR: &'static str = regular::GEAR;
+    pub const INFO: &'static str = regular::INFO;
+    pub const WARNING: &'static str = regular::WARNING;
+    pub const CHECK: &'static str = regular::CHECK;
+    pub const X: &'static str = regular::X;
+    pub const SEARCH: &'static str = regular::MAGNIFYING_GLASS;
+    pub const CLOSE: &'static str = regular::X;
 }
 
-/// Phosphor icon variants (when egui_phosphor is available)
-#[cfg(feature = "egui-phosphor")]
-pub mod phosphor {
-    use egui_phosphor::regular as icons;
-
-    pub struct PhosphorIcons;
-
-    impl PhosphorIcons {
-        pub const FILE: &'static str = icons::FILE;
-        pub const FOLDER_OPEN: &'static str = icons::FOLDER_OPEN;
-        pub const MAGNIFYING_GLASS: &'static str = icons::MAGNIFYING_GLASS;
-        pub const FLOPPY_DISK: &'static str = icons::FLOPPY_DISK;
-        pub const TRASH: &'static str = icons::TRASH;
-        pub const PLUS: &'static str = icons::PLUS;
-        pub const X: &'static str = icons::X;
-        pub const ARROW_CLOCKWISE: &'static str = icons::ARROW_CLOCKWISE;
-        pub const GEAR: &'static str = icons::GEAR;
-    }
+/// Loads the Phosphor regular variant into the given definitions.
+pub fn add_phosphor_font(fonts: &mut egui::FontDefinitions) {
+    egui_phosphor::add_to_fonts(fonts, egui_phosphor::Variant::Regular);
 }

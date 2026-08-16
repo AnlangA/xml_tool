@@ -102,6 +102,11 @@ impl WorkspaceState {
         &self.sessions
     }
 
+    /// Mutable access to all sessions (save completion, watcher reloads).
+    pub fn sessions_mut(&mut self) -> &mut [DocumentSession] {
+        &mut self.sessions
+    }
+
     /// The active tab, if any.
     pub fn active(&self) -> Option<&DocumentSession> {
         self.active_index.and_then(|index| self.sessions.get(index))

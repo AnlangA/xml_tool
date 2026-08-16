@@ -32,7 +32,9 @@ fn stale_task_results_never_override_newer_revision() {
     let session = SessionId(7);
     let started_at = Revision(3);
 
-    manager.spawn(session, started_at, |_| String::from("computed-on-rev-3"));
+    manager.spawn(session, started_at, |_| {
+        Box::new(String::from("computed-on-rev-3"))
+    });
     // The document moved on before the job finished.
     let stale = manager.wait_for_outcome(session, Revision(4));
     assert!(
@@ -41,17 +43,22 @@ fn stale_task_results_never_override_newer_revision() {
     );
 
     // The correct revision still receives it (take the next job).
-    manager.spawn(session, Revision(4), |_| String::from("computed-on-rev-4"));
+    manager.spawn(session, Revision(4), |_| {
+        Box::new(String::from("computed-on-rev-4"))
+    });
     let outcome = manager
         .wait_for_outcome(session, Revision(4))
         .expect("fresh result");
-    assert_eq!(outcome.result, "computed-on-rev-4");
+    let payload = *outcome.result.downcast::<String>().expect("string payload");
+    assert_eq!(payload, "computed-on-rev-4");
 }
 
 #[test]
 fn results_belonging_to_other_sessions_are_dropped() {
     let manager = TaskManager::new();
-    manager.spawn(SessionId(1), Revision(1), |_| String::from("session-1"));
+    manager.spawn(SessionId(1), Revision(1), |_| {
+        Box::new(String::from("session-1"))
+    });
     assert!(
         manager
             .wait_for_outcome(SessionId(2), Revision(1))
@@ -63,7 +70,7 @@ fn results_belonging_to_other_sessions_are_dropped() {
 fn cancelled_jobs_have_their_results_discarded() {
     let manager = TaskManager::new();
     let session = SessionId(9);
-    let (job, _flag) = manager.spawn(session, Revision(1), |_| String::from("late"));
+    let (job, _flag) = manager.spawn(session, Revision(1), |_| Box::new(String::from("late")));
     manager.cancel(job);
     assert!(manager.wait_for_outcome(session, Revision(1)).is_none());
 }
@@ -72,8 +79,8 @@ fn cancelled_jobs_have_their_results_discarded() {
 fn cancel_session_invalidates_every_job_of_that_session() {
     let manager = TaskManager::new();
     let session = SessionId(4);
-    let (first, _) = manager.spawn(session, Revision(1), |_| String::from("a"));
-    let (second, _) = manager.spawn(session, Revision(1), |_| String::from("b"));
+    let (first, _) = manager.spawn(session, Revision(1), |_| Box::new(String::from("a")));
+    let (second, _) = manager.spawn(session, Revision(1), |_| Box::new(String::from("b")));
     manager.cancel_session(session);
     assert!(manager.wait_for_outcome(session, Revision(1)).is_none());
     assert_ne!(first, second);
@@ -88,7 +95,7 @@ fn parallel_jobs_all_complete() {
         manager.spawn(session, Revision(1), move |_| {
             std::thread::sleep(Duration::from_millis(10));
             COUNTER.fetch_add(1, Ordering::SeqCst);
-            format!("job-{i}")
+            Box::new(format!("job-{i}"))
         });
     }
     let mut received = 0;

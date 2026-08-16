@@ -25,9 +25,30 @@ pub struct JobId(pub u64);
 pub struct SessionId(pub u64);
 
 /// What a job produced when it finished.
-pub struct JobOutcome<T> {
+pub struct JobOutcome {
     pub job: JobId,
-    pub result: T,
+    /// The job's return value, type-erased; callers downcast to the type
+    /// their closure returned.
+    pub result: Box<dyn std::any::Any + Send>,
+}
+
+/// Downcasts a job result, panicking with a useful message on mismatch.
+#[macro_export]
+macro_rules! job_result {
+    ($outcome:expr, $ty:ty) => {
+        $outcome
+            .result
+            .downcast::<$ty>()
+            .map(|boxed| *boxed)
+            .map_err(|bad| {
+                format!(
+                    "job {} returned {}",
+                    $outcome.job.0,
+                    std::any::type_name_of_val(&*bad)
+                )
+            })
+            .expect("job payload type matches the caller's closure")
+    };
 }
 
 /// Cooperative cancellation token shared with a running job.
@@ -60,8 +81,8 @@ struct PendingJob {
     cancel: CancelFlag,
 }
 
-type JobBody = Box<dyn FnOnce() -> String + Send>;
-type FinishedJob = (TaskSpec, CancelFlag, String);
+type JobBody = Box<dyn FnOnce() -> Box<dyn std::any::Any + Send> + Send>;
+type FinishedJob = (TaskSpec, CancelFlag, Box<dyn std::any::Any + Send>);
 
 /// Minimal counting semaphore (MSRV-safe; `std::thread::Semaphore` is newer
 /// than the 1.88 toolchain this project pins).
@@ -127,12 +148,13 @@ impl TaskManager {
     }
 
     /// Submits `body` as a background job attributed to `session` at
-    /// `revision`. Returns the job id and its cancel flag.
+    /// `revision`. Returns the job id and its cancel flag. The closure's
+    /// return value is delivered back type-erased; the poller downcasts it.
     pub fn spawn(
         &self,
         session: SessionId,
         revision: Revision,
-        body: impl FnOnce(CancelFlag) -> String + Send + 'static,
+        body: impl FnOnce(CancelFlag) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> (JobId, CancelFlag) {
         let job = JobId(self.next_job.fetch_add(1, Ordering::SeqCst));
         let spec = TaskSpec {
@@ -188,7 +210,7 @@ impl TaskManager {
         }
     }
 
-    /// Waits for and returns the next finished job whose triple still
+    /// Non-blocking poll for the next finished job whose triple still
     /// matches `session`/`revision` and whose cancellation flag is clear.
     ///
     /// Stale or cancelled results are dropped silently. `Ok(None)` means
@@ -198,7 +220,7 @@ impl TaskManager {
         &self,
         session: SessionId,
         revision: Revision,
-    ) -> Result<Option<JobOutcome<String>>, std::sync::mpsc::TryRecvError> {
+    ) -> Result<Option<JobOutcome>, std::sync::mpsc::TryRecvError> {
         loop {
             let received = {
                 let receiver = self.results.1.lock().expect("results lock");
@@ -220,11 +242,7 @@ impl TaskManager {
 
     /// Blocking variant for tests: drains until an applicable outcome
     /// arrives (or the deadline passes).
-    pub fn wait_for_outcome(
-        &self,
-        session: SessionId,
-        revision: Revision,
-    ) -> Option<JobOutcome<String>> {
+    pub fn wait_for_outcome(&self, session: SessionId, revision: Revision) -> Option<JobOutcome> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             match self.take_outcome(session, revision) {
