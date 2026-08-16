@@ -1,8 +1,9 @@
 //! Desktop UI: the shell, its panels, and reusable widgets.
 
+pub mod alerts;
 // base64_image and xml_tree keep their own unit tests and are re-wired by
-// later plan steps (image decoding in step 9); their non-test helpers are
-// unused until then.
+// later plan steps (image decoding); their non-test helpers are unused
+// until then.
 #[allow(dead_code)]
 pub mod base64_image;
 pub mod dialogs;

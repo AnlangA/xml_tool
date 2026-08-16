@@ -273,6 +273,67 @@ fn toolbar(ui: &mut Ui, shell: &mut AppShell) {
                 indent: "  ".to_string(),
             });
         }
+        ui.separator();
+        let undo_enabled = shell
+            .workspace
+            .active()
+            .is_some_and(|session| session.history.undo_depth() > 0);
+        if ui
+            .add_enabled(
+                undo_enabled,
+                egui::Button::new(Icons::ARROW_COUNTER_CLOCKWISE),
+            )
+            .on_hover_text(shell.localization.msg("toolbar-undo"))
+            .clicked()
+        {
+            shell.undo();
+        }
+        let redo_enabled = shell
+            .workspace
+            .active()
+            .is_some_and(|session| session.history.redo_depth() > 0);
+        if ui
+            .add_enabled(redo_enabled, egui::Button::new(Icons::ARROW_CLOCKWISE))
+            .on_hover_text(shell.localization.msg("toolbar-redo"))
+            .clicked()
+        {
+            shell.redo();
+        }
+        if ui
+            .add(egui::Button::new(Icons::MAGNIFYING_GLASS).selected(shell.search.open))
+            .on_hover_text(shell.localization.msg("action-find"))
+            .clicked()
+        {
+            shell.search.open = !shell.search.open;
+        }
+        ui.separator();
+        let (errors, warnings, infos) = shell.alerts.counts();
+        let chip = if errors > 0 {
+            format!("{} {errors}", Icons::WARNING)
+        } else if warnings > 0 {
+            format!("{} {warnings}", Icons::INFO)
+        } else if infos > 0 {
+            format!("{} {infos}", Icons::CHECK)
+        } else {
+            Icons::CHECK.to_string()
+        };
+        let chip_color = if errors > 0 {
+            Theme::ERROR
+        } else if warnings > 0 {
+            Theme::WARNING
+        } else {
+            Theme::SUCCESS
+        };
+        if ui
+            .add(
+                egui::Button::new(RichText::new(chip).color(chip_color))
+                    .selected(shell.problems_panel_open),
+            )
+            .on_hover_text(shell.localization.msg("panel-problems"))
+            .clicked()
+        {
+            shell.problems_panel_open = !shell.problems_panel_open;
+        }
         if shell.open_pending > 0 {
             ui.spinner();
         }
@@ -281,47 +342,56 @@ fn toolbar(ui: &mut Ui, shell: &mut AppShell) {
 
 pub fn document_tabs(ctx: &Context, shell: &mut AppShell) {
     TopBottomPanel::top("document-tabs").show(ctx, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let titles: Vec<(String, bool)> = shell
-                .workspace
-                .sessions()
-                .iter()
-                .map(|session| (session.display_name(), session.is_dirty()))
-                .collect();
-            let active = shell
-                .workspace
-                .sessions()
-                .iter()
-                .position(|session| Some(session.id) == shell.workspace.active_id());
-            let mut select = None;
-            let mut close = None;
-            for (index, (title, dirty)) in titles.iter().enumerate() {
-                let label = if *dirty {
-                    format!("{title} ●")
-                } else {
-                    title.clone()
-                };
-                let is_active = Some(index) == active;
-                let mut text = RichText::new(&label);
-                if is_active {
-                    text = text.strong();
-                }
-                if ui.selectable_label(is_active, text).clicked() {
-                    select = Some(index);
-                }
-                if ui.small_button("×").clicked() {
-                    close = Some(index);
-                }
-                ui.separator();
-            }
-            if let Some(index) = select {
-                shell.workspace.select(index);
-            }
-            if let Some(index) = close {
-                shell.workspace.select(index);
-                shell.close_active_tab();
-            }
-        });
+        // Horizontal scrolling keeps every tab reachable without wrapping
+        // rows when a session list grows.
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let titles: Vec<(String, bool)> = shell
+                        .workspace
+                        .sessions()
+                        .iter()
+                        .map(|session| (session.display_name(), session.is_dirty()))
+                        .collect();
+                    let active = shell
+                        .workspace
+                        .sessions()
+                        .iter()
+                        .position(|session| Some(session.id) == shell.workspace.active_id());
+                    let mut select = None;
+                    let mut close = None;
+                    for (index, (title, dirty)) in titles.iter().enumerate() {
+                        let label = if *dirty {
+                            format!("{title} ●")
+                        } else {
+                            title.clone()
+                        };
+                        let is_active = Some(index) == active;
+                        let mut text = RichText::new(&label);
+                        if is_active {
+                            text = text.strong().color(Theme::TEXT_HIGHLIGHT);
+                        }
+                        if *dirty {
+                            text = text.color(Theme::WARNING);
+                        }
+                        if ui.selectable_label(is_active, text).clicked() {
+                            select = Some(index);
+                        }
+                        if ui.small_button("×").clicked() {
+                            close = Some(index);
+                        }
+                        ui.separator();
+                    }
+                    if let Some(index) = select {
+                        shell.workspace.select(index);
+                    }
+                    if let Some(index) = close {
+                        shell.workspace.select(index);
+                        shell.close_active_tab();
+                    }
+                });
+            });
     });
 }
 
@@ -592,6 +662,21 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
             .unwrap_or_else(|| session.document.source().to_string());
         let revision = session.document.revision();
 
+        if let Some((line, column)) = shell.source_jump {
+            let hint = shell.localization.msg_with(
+                "source-jump-hint",
+                Some(&crate::fluent_args!(
+                    "line" => line as i32,
+                    "column" => column as i32
+                )),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} {hint}", Icons::INFO)).color(Theme::INFO));
+                if ui.small_button("×").clicked() {
+                    shell.source_jump = None;
+                }
+            });
+        }
         if draft_active {
             ui.horizontal(|ui| {
                 ui.label(
@@ -631,36 +716,225 @@ pub fn central_panel(ctx: &Context, shell: &mut AppShell) {
 }
 
 // ---------------------------------------------------------------------------
+// Banner strip: non-blocking alerts under the toolbar
+// ---------------------------------------------------------------------------
+
+pub fn banner_strip(ctx: &Context, shell: &mut AppShell) {
+    if shell.banner.is_none() {
+        return;
+    }
+    let (path, dirty) = match &shell.banner {
+        Some(crate::ui::shell::Banner::Reload { path, dirty }) => (path.clone(), *dirty),
+        None => return,
+    };
+    let mut dismiss_banner = false;
+    {
+        {
+            let path = &path;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut action: Option<&str> = None;
+            TopBottomPanel::top("banner-reload")
+                .frame(
+                    egui::Frame::new()
+                        .fill(Theme::WARNING_BG)
+                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(Icons::WARNING).color(Theme::WARNING));
+                        let body_key = if dirty {
+                            "dialog-reload-dirty-body"
+                        } else {
+                            "dialog-reload-clean-body"
+                        };
+                        ui.label(shell.localization.msg_with(
+                            body_key,
+                            Some(&crate::fluent_args!("name" => name.as_str())),
+                        ));
+                        if ui
+                            .small_button(shell.localization.msg("dialog-reload-reload"))
+                            .clicked()
+                        {
+                            action = Some("reload");
+                        }
+                        if dirty
+                            && ui
+                                .small_button(shell.localization.msg("dialog-reload-keep"))
+                                .clicked()
+                        {
+                            action = Some("keep");
+                        }
+                        if ui
+                            .small_button(shell.localization.msg("action-exit-cancel"))
+                            .clicked()
+                        {
+                            action = Some("ignore");
+                        }
+                    });
+                });
+            match action {
+                Some("reload") => {
+                    let path = path.clone();
+                    shell.open_path(path);
+                    dismiss_banner = true;
+                }
+                Some("keep") | Some("ignore") => {
+                    dismiss_banner = true; // dismissed
+                }
+                _ => {}
+            }
+        }
+    }
+    if dismiss_banner {
+        shell.banner = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bottom: problems + tasks
 // ---------------------------------------------------------------------------
 
 pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
+    if !shell.problems_panel_open {
+        return;
+    }
+    let mut dismiss = None;
+    let mut clear_all = false;
+    let mut jump = None;
+    let mut filter_change = None;
+    let mut collapse_requested = false;
+
     TopBottomPanel::bottom("problems")
         .resizable(true)
-        .default_height(110.0)
+        .default_height(130.0)
         .show(ctx, |ui| {
-            ui.heading(shell.localization.msg("panel-problems"));
-            if shell.problems.is_empty() {
+            ui.horizontal(|ui| {
+                ui.heading(shell.localization.msg("panel-problems"));
+                let (errors, warnings, infos) = shell.alerts.counts();
+                let filter = shell.alerts.filter;
+                for (shown, count, toggle_key) in [
+                    (filter.errors, errors, "problems-filter-errors"),
+                    (filter.warnings, warnings, "problems-filter-warnings"),
+                    (filter.infos, infos, "problems-filter-infos"),
+                ] {
+                    let label = format!("{} {}", shell.localization.msg(toggle_key), count);
+                    let mut text = RichText::new(label);
+                    if !shown {
+                        text = text.color(Theme::TEXT_MUTED);
+                    }
+                    if ui.selectable_label(shown, text).clicked() {
+                        filter_change = Some(toggle_key);
+                    }
+                }
+                if !shell.alerts.is_empty()
+                    && ui
+                        .small_button(shell.localization.msg("problems-clear"))
+                        .clicked()
+                {
+                    clear_all = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let collapse = ui.small_button("▾");
+                    if collapse.clicked() {
+                        collapse_requested = true;
+                    }
+                });
+            });
+
+            if shell.alerts.is_empty() {
                 ui.label(
                     RichText::new(shell.localization.msg("problems-empty"))
                         .color(Theme::TEXT_MUTED),
                 );
                 return;
             }
-            ScrollArea::vertical().show(ui, |ui| {
-                for problem in &shell.problems {
-                    let color = match problem.severity {
-                        crate::core::Severity::Error => Theme::ERROR,
-                        crate::core::Severity::Warning => Theme::WARNING,
-                        crate::core::Severity::Info => Theme::INFO,
-                    };
-                    ui.label(
-                        RichText::new(format!("{} {}", problem.code, problem.message_key))
-                            .color(color),
-                    );
-                }
-            });
+            let rows: Vec<crate::ui::alerts::Alert> = shell.alerts.visible().cloned().collect();
+            if rows.is_empty() {
+                ui.label(
+                    RichText::new(shell.localization.msg("problems-filtered-empty"))
+                        .color(Theme::TEXT_MUTED),
+                );
+                return;
+            }
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for alert in &rows {
+                        let (color, icon) = match alert.severity {
+                            crate::core::Severity::Error => (Theme::ERROR, Icons::WARNING),
+                            crate::core::Severity::Warning => (Theme::WARNING, Icons::WARNING),
+                            crate::core::Severity::Info => (Theme::INFO, Icons::INFO),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon).color(color));
+                            let mut line = format!("{}  {}", alert.code, alert.message);
+                            if alert.count > 1 {
+                                line.push_str(&format!("  ×{}", alert.count));
+                            }
+                            if let Some((line_no, column)) = alert.position {
+                                line.push_str(&format!(
+                                    "  [{}]",
+                                    shell.localization.msg_with(
+                                        "problems-at-position",
+                                        Some(&crate::fluent_args!(
+                                            "line" => line_no as i32,
+                                            "column" => column as i32
+                                        )),
+                                    )
+                                ));
+                            }
+                            let response =
+                                ui.label(RichText::new(line).color(color).background_color(
+                                    if alert.position.is_some() {
+                                        Theme::HOVER_BG
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    },
+                                ));
+                            if alert.position.is_some() {
+                                let response =
+                                    response.on_hover_text(shell.localization.msg("problems-jump"));
+                                if response.clicked() {
+                                    jump = alert.position;
+                                }
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("×").clicked() {
+                                        dismiss = Some(alert.sequence);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                });
         });
+
+    if let Some(key) = filter_change {
+        let filter = &mut shell.alerts.filter;
+        match key {
+            "problems-filter-errors" => filter.errors = !filter.errors,
+            "problems-filter-warnings" => filter.warnings = !filter.warnings,
+            _ => filter.infos = !filter.infos,
+        }
+    }
+    if let Some(sequence) = dismiss {
+        shell.alerts.dismiss(sequence);
+    }
+    if clear_all {
+        shell.alerts.clear();
+    }
+    if let Some(position) = jump {
+        shell.source_jump = Some(position);
+        shell.focus = FocusPane::Source;
+    }
+    if collapse_requested {
+        shell.problems_panel_open = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +978,25 @@ pub fn status_bar(ctx: &Context, shell: &mut AppShell) {
             }
         };
         ui.horizontal(|ui| {
+            let (errors, warnings, infos) = shell.alerts.counts();
+            if errors + warnings + infos > 0 {
+                let (color, icon) = if errors > 0 {
+                    (Theme::ERROR, Icons::WARNING)
+                } else if warnings > 0 {
+                    (Theme::WARNING, Icons::WARNING)
+                } else {
+                    (Theme::INFO, Icons::INFO)
+                };
+                let chip = format!("{icon} {errors}/{warnings}/{infos}");
+                if ui
+                    .selectable_label(shell.problems_panel_open, RichText::new(chip).color(color))
+                    .on_hover_text(shell.localization.msg("panel-problems"))
+                    .clicked()
+                {
+                    shell.problems_panel_open = !shell.problems_panel_open;
+                }
+                ui.separator();
+            }
             for (index, text) in status_texts.iter().enumerate() {
                 if index > 0 {
                     ui.separator();

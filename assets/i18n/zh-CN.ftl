@@ -72,6 +72,16 @@ inspector-no-selection = 在大纲中选择一个节点
 inspector-read-only = 只读模式：大文档不可编辑
 
 problems-empty = 没有问题
+toolbar-undo = 撤销
+toolbar-redo = 重做
+problems-filter-errors = 错误
+problems-filter-warnings = 警告
+problems-filter-infos = 信息
+problems-filtered-empty = 告警已全部被过滤
+problems-clear = 全部清除
+problems-at-position = 第 { $line } 行，第 { $column } 列
+problems-jump = 点击跳转到源码位置
+source-jump-hint = 跳转目标：第 { $line } 行，第 { $column } 列
 problems-count = { $count ->
     [other] { $count } 个问题
    *[other] { $count } 个问题

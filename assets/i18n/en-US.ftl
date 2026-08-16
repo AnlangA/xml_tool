@@ -72,6 +72,16 @@ inspector-no-selection = Select a node in the outline
 inspector-read-only = Read-only mode: editing disabled for large documents
 
 problems-empty = No problems
+toolbar-undo = Undo
+toolbar-redo = Redo
+problems-filter-errors = Errors
+problems-filter-warnings = Warnings
+problems-filter-infos = Info
+problems-filtered-empty = All alerts are filtered out
+problems-clear = Clear all
+problems-at-position = line { $line }, column { $column }
+problems-jump = Click to jump to the source position
+source-jump-hint = Jump target: line { $line }, column { $column }
 problems-count = { $count ->
     [one] 1 problem
    *[other] { $count } problems

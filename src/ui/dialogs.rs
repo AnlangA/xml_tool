@@ -44,7 +44,6 @@ fn title_key(dialog: &Dialog) -> &'static str {
         Dialog::ExiWorkbench { .. } => "exi-dialog-title",
         Dialog::ConfirmDelete { .. } => "dialog-delete-title",
         Dialog::UnsavedExit => "dialog-unsaved-title",
-        Dialog::ReloadBanner { .. } => "dialog-reload-title",
         Dialog::Recovery { .. } => "dialog-recovery-title",
         Dialog::Shortcuts => "shortcut-help",
     }
@@ -185,45 +184,6 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                 }
                 if ui
                     .button(shell.localization.msg("dialog-unsaved-cancel"))
-                    .clicked()
-                {
-                    *keep = false;
-                }
-            });
-        }
-        Dialog::ReloadBanner { path, dirty } => {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let key = if *dirty {
-                "dialog-reload-dirty-body"
-            } else {
-                "dialog-reload-clean-body"
-            };
-            ui.label(
-                shell
-                    .localization
-                    .msg_with(key, Some(&fluent_args!("name" => name.as_str()))),
-            );
-            ui.horizontal(|ui| {
-                if ui
-                    .button(shell.localization.msg("dialog-reload-reload"))
-                    .clicked()
-                {
-                    let path = path.clone();
-                    shell.open_path(path);
-                    *keep = false;
-                }
-                if *dirty {
-                    if ui
-                        .button(shell.localization.msg("dialog-reload-keep"))
-                        .clicked()
-                    {
-                        *keep = false;
-                    }
-                } else if ui
-                    .button(shell.localization.msg("action-exit-cancel"))
                     .clicked()
                 {
                     *keep = false;

@@ -255,3 +255,140 @@ fn menu_click_new_creates_a_document() {
         "menu New must create a document"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Alert handling (step "优化告警处理")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn problems_panel_lists_filters_and_clears() {
+    let mut shell = AppShell::new();
+    shell.localization.set_language(Language::English);
+    let mut harness = Harness::new_state(|ctx, shell| shell.update(ctx), shell);
+    harness.set_size(egui::vec2(1280.0, 800.0));
+    harness.run();
+    {
+        let shell = harness.state_mut();
+        shell
+            .alerts
+            .push(xml_tool::core::Severity::Error, "io", "disk on fire");
+        shell.alerts.push(
+            xml_tool::core::Severity::Warning,
+            "exi-fidelity",
+            "drops comments",
+        );
+    }
+    harness.run();
+
+    // The arriving error auto-opened the panel; both rows render.
+    assert!(harness.state().problems_panel_open);
+    assert!(
+        harness
+            .query_all_by_label_contains("disk on fire")
+            .next()
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("drops comments")
+            .next()
+            .is_some()
+    );
+
+    // Filter out warnings: the warning row disappears, error stays.
+    harness
+        .query_all_by_label_contains("Warnings")
+        .next()
+        .expect("warnings filter toggle")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .query_all_by_label_contains("drops comments")
+            .next()
+            .is_none(),
+        "filtered warning disappears"
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("disk on fire")
+            .next()
+            .is_some()
+    );
+
+    // Clear all: back to the empty state.
+    harness
+        .query_all_by_label_contains("Clear all")
+        .next()
+        .expect("clear button")
+        .click();
+    harness.run();
+    assert!(harness.state().alerts.is_empty());
+    assert!(
+        harness
+            .query_all_by_label_contains("No problems")
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn reload_banner_is_non_blocking_and_dismissable() {
+    let mut shell = AppShell::new();
+    shell.localization.set_language(Language::English);
+    let mut harness = Harness::new_state(|ctx, shell| shell.update(ctx), shell);
+    harness.set_size(egui::vec2(1280.0, 800.0));
+    harness.run();
+    harness.state_mut().banner = Some(xml_tool::ui::shell::Banner::Reload {
+        path: std::path::PathBuf::from("/tmp/watched.xml"),
+        dirty: false,
+    });
+    harness.run();
+
+    // The banner renders as a strip with actions — not a centered modal.
+    assert!(
+        harness
+            .query_all_by_label_contains("watched.xml")
+            .next()
+            .is_some(),
+        "banner shows the file name"
+    );
+    assert!(harness.query_by_label("Reload").is_some(), "reload action");
+
+    // Dismissing removes it on the next frame.
+    harness.get_by_label("Cancel").click();
+    harness.run();
+    assert!(harness.state().banner.is_none());
+    assert!(
+        harness
+            .query_all_by_label_contains("watched.xml")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn jump_target_hint_appears_in_source_pane() {
+    let mut shell = combo_shell(Language::English, ThemeMode::Dark);
+    shell.new_document();
+    shell.source_jump = Some((4, 2));
+    shell.problems_panel_open = false;
+    let mut harness = Harness::new_state(|ctx, shell| shell.update(ctx), shell);
+    harness.set_size(egui::vec2(1280.0, 800.0));
+    harness.run();
+    assert!(
+        harness
+            .query_all_by_label_contains("Jump target: line")
+            .next()
+            .is_some(),
+        "the source pane shows the jump hint"
+    );
+    // Fluent interpolates the coordinates (wrapped in bidi isolation
+    // marks in the rendered label; assert the digits via the API).
+    let localization = Localization::with_language(Language::English);
+    let hint = localization.msg_with(
+        "source-jump-hint",
+        Some(&xml_tool::fluent_args!("line" => 4i32, "column" => 2i32)),
+    );
+    assert!(hint.contains('4') && hint.contains('2'), "hint: {hint}");
+}

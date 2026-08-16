@@ -52,14 +52,17 @@ pub enum Dialog {
         descendants: usize,
     },
     UnsavedExit,
-    ReloadBanner {
-        path: PathBuf,
-        dirty: bool,
-    },
     Recovery {
         snapshots: Vec<(u64, RecoverySnapshot)>,
     },
     Shortcuts,
+}
+
+/// Non-blocking banners: transient conditions the user should see
+/// without a modal stealing focus. Rendered as a strip under the toolbar.
+pub enum Banner {
+    /// The file behind a session changed on disk.
+    Reload { path: PathBuf, dirty: bool },
 }
 
 /// Which pane receives keyboard focus (F6 cycles).
@@ -83,8 +86,13 @@ pub struct AppShell {
     /// Expansion state per session (node ids are session-scoped).
     expanded: HashMap<SessionId, HashSet<NodeId>>,
     pub dialog: Option<Dialog>,
+    pub banner: Option<Banner>,
     pub focus: FocusPane,
-    pub problems: Vec<Diagnostic>,
+    pub alerts: crate::ui::alerts::AlertCenter,
+    /// Whether the problems panel is expanded.
+    pub problems_panel_open: bool,
+    /// Pending jump target (1-based line, column) for the source pane.
+    pub source_jump: Option<(usize, usize)>,
     /// Search state for the active session.
     pub search: panels::SearchState,
     pub(crate) pending_new_attr: bool,
@@ -114,8 +122,11 @@ impl AppShell {
             recovery: RecoveryStore::new(RecoveryStore::default_root()),
             expanded: HashMap::new(),
             dialog: None,
+            banner: None,
             focus: FocusPane::Outline,
-            problems: Vec::new(),
+            alerts: crate::ui::alerts::AlertCenter::default(),
+            problems_panel_open: false,
+            source_jump: None,
             search: panels::SearchState::default(),
             pending_new_attr: false,
             pending_remove_attr: None,
@@ -160,9 +171,14 @@ impl AppShell {
         self.frames.record("background-poll", started.elapsed());
         self.handle_shortcuts(ctx);
 
+        if self.alerts.panel_requested {
+            self.alerts.panel_requested = false;
+            self.problems_panel_open = true;
+        }
         let started = std::time::Instant::now();
         panels::top_bar(ctx, self);
         self.frames.record("top-bar", started.elapsed());
+        panels::banner_strip(ctx, self);
         panels::document_tabs(ctx, self);
         panels::bottom_panel(ctx, self);
         let started = std::time::Instant::now();
@@ -329,7 +345,20 @@ impl AppShell {
     }
 
     pub(crate) fn push_problem(&mut self, severity: Severity, code: &str, message: String) {
-        self.problems.push(Diagnostic::new(severity, code, message));
+        self.alerts.push(severity, code, &message);
+    }
+
+    /// Records an alert with a source position (jump-to-line wiring).
+    #[cfg(test)]
+    pub(crate) fn push_problem_at(
+        &mut self,
+        severity: Severity,
+        code: &str,
+        message: String,
+        position: (usize, usize),
+    ) {
+        self.alerts
+            .push_with_position(severity, code, &message, Some(position));
     }
 
     // -----------------------------------------------------------------------
@@ -417,7 +446,7 @@ impl AppShell {
             let dirty = self.workspace.sessions().iter().any(|session| {
                 session.path.as_deref() == Some(change.path()) && session.is_dirty()
             });
-            self.dialog = Some(Dialog::ReloadBanner { path, dirty });
+            self.banner = Some(Banner::Reload { path, dirty });
         }
     }
 
@@ -666,7 +695,7 @@ impl AppShell {
                 let diagnostic = Diagnostic::new(Severity::Error, "source-draft", message.clone())
                     .with_argument("line", line.to_string())
                     .with_argument("column", column.to_string());
-                self.problems.push(diagnostic);
+                self.alerts.push_diagnostic(&diagnostic);
             }
         }
     }
@@ -784,19 +813,13 @@ impl AppShell {
                 let Some(session) = self.workspace.active() else {
                     return;
                 };
-                for diagnostic in
-                    crate::services::validation::validate(&session.document, &validator)
-                {
-                    let mut rendered = diagnostic.message_key.clone();
-                    if let (Some(line), Some(column)) = (
-                        diagnostic.arguments.get("line"),
-                        diagnostic.arguments.get("column"),
-                    ) {
-                        rendered.push_str(&format!(" ({line}:{column})"));
-                    }
-                    self.push_problem(diagnostic.severity, &diagnostic.code, rendered);
+                let diagnostics =
+                    crate::services::validation::validate(&session.document, &validator);
+                let found_issues = !diagnostics.is_empty();
+                for diagnostic in &diagnostics {
+                    self.alerts.push_diagnostic(diagnostic);
                 }
-                if self.problems.is_empty() {
+                if !found_issues {
                     self.push_problem(crate::core::Severity::Info, "xsd", String::from("valid"));
                 }
             }
@@ -1109,9 +1132,10 @@ mod tests {
         );
         assert!(
             shell
-                .problems
+                .alerts
+                .alerts()
                 .iter()
-                .any(|problem| problem.code == "draft-active")
+                .any(|alert| alert.code == "draft-active")
         );
         // The failure left no trace.
         assert_eq!(
@@ -1141,7 +1165,7 @@ mod tests {
             },
         }));
         shell.undo(); // keep the document minimal and clean
-        shell.problems.clear();
+        shell.alerts.clear();
 
         let mut text = shell
             .workspace
@@ -1198,9 +1222,10 @@ mod tests {
         for _ in 0..200 {
             shell.poll_apply_jobs();
             if shell
-                .problems
+                .alerts
+                .alerts()
                 .iter()
-                .any(|problem| problem.code == "source-draft")
+                .any(|alert| alert.code == "source-draft")
             {
                 break;
             }
@@ -1220,11 +1245,10 @@ mod tests {
         assert_eq!(session.document.source(), source_before);
         assert!(
             shell
-                .problems
+                .alerts
+                .alerts()
                 .iter()
-                .any(|problem| problem.code == "source-draft"
-                    && problem.arguments.contains_key("line")
-                    && problem.arguments.contains_key("column"))
+                .any(|alert| alert.code == "source-draft" && alert.position.is_some())
         );
     }
 
@@ -1251,5 +1275,65 @@ mod tests {
         assert!(!shell.save_active(None));
         assert!(shell.workspace.active().unwrap().mode == DocumentMode::LargeReadOnly);
         let _ = root;
+    }
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+
+    #[test]
+    fn errors_open_the_problems_panel_once() {
+        let mut shell = AppShell::new();
+        assert!(!shell.problems_panel_open);
+        shell.alerts.push(Severity::Error, "io", "boom");
+        assert!(shell.alerts.panel_requested);
+        let ctx = Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| shell.update(ctx));
+        assert!(
+            shell.problems_panel_open,
+            "an arriving error must expand the panel"
+        );
+        assert!(!shell.alerts.panel_requested, "consumed after opening");
+        shell.alerts.panel_requested = true; // simulate a repeat
+        shell.alerts.panel_requested = false;
+        shell.problems_panel_open = false;
+        shell.alerts.push(Severity::Info, "info", "quiet");
+        let ctx = Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| shell.update(ctx));
+        assert!(
+            !shell.problems_panel_open,
+            "info alerts never force the panel"
+        );
+    }
+
+    #[test]
+    fn repeated_alerts_share_one_row() {
+        let mut shell = AppShell::new();
+        for _ in 0..5 {
+            shell.push_problem(Severity::Warning, "exi-fidelity", "drops comments".into());
+        }
+        assert_eq!(shell.alerts.len(), 1);
+        assert_eq!(shell.alerts.alerts()[0].count, 5);
+        shell.alerts.clear_code("exi-fidelity");
+        assert!(shell.alerts.is_empty());
+    }
+
+    #[test]
+    fn source_apply_positions_become_jump_targets() {
+        let mut shell = AppShell::new();
+        shell.push_problem_at(
+            Severity::Error,
+            "source-draft",
+            "mismatched tag".into(),
+            (3, 7),
+        );
+        let alert = &shell.alerts.alerts()[0];
+        assert_eq!(alert.position, Some((3, 7)));
+        // The panel turns positions into jump targets.
+        shell.source_jump = alert.position;
+        shell.focus = FocusPane::Source;
+        assert_eq!(shell.source_jump, Some((3, 7)));
+        assert_eq!(shell.focus, FocusPane::Source);
     }
 }

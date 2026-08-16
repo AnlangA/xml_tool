@@ -23,6 +23,7 @@ impl Icons {
     pub const CHECK: &'static str = regular::CHECK;
     pub const X: &'static str = regular::X;
     pub const SEARCH: &'static str = regular::MAGNIFYING_GLASS;
+    pub const ARROW_COUNTER_CLOCKWISE: &'static str = regular::ARROW_COUNTER_CLOCKWISE;
     pub const CLOSE: &'static str = regular::X;
 }
 
