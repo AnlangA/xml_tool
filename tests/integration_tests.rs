@@ -331,8 +331,7 @@ fn test_large_document() {
     // Should parse in reasonable time (< 100ms)
     assert!(
         duration.as_millis() < 100,
-        "Parsing took too long: {:?}",
-        duration
+        "Parsing took too long: {duration:?}"
     );
 }
 

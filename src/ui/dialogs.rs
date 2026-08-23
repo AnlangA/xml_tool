@@ -104,7 +104,10 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                 *keep = false;
             }
         }
-        Dialog::XPathQuery { expression, results } => {
+        Dialog::XPathQuery {
+            expression,
+            results,
+        } => {
             let mut buffer = expression.clone();
             let field_id = ui.id().with("xpath-field");
             let response = ui.add(
@@ -134,11 +137,10 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
             }
             if let Some(nodes) = results {
                 ui.separator();
-                ui.label(
-                    shell
-                        .localization
-                        .msg_with("xpath-result-nodes", Some(&fluent_args!("count" => nodes.len() as i32))),
-                );
+                ui.label(shell.localization.msg_with(
+                    "xpath-result-nodes",
+                    Some(&fluent_args!("count" => nodes.len() as i32)),
+                ));
                 egui::ScrollArea::vertical()
                     .max_height(180.0)
                     .show(ui, |ui| {
@@ -277,8 +279,10 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                             shell.expand_root_default(session_id);
                             if let Some(path) = snapshot.selection_path.as_deref()
                                 && let Some(session) = shell.workspace.active()
-                                && let Some(node) =
-                                    crate::services::outline::node_from_path(&session.document, path)
+                                && let Some(node) = crate::services::outline::node_from_path(
+                                    &session.document,
+                                    path,
+                                )
                             {
                                 shell.reveal_outline_node(node);
                             }

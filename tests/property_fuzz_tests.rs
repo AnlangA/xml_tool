@@ -264,7 +264,10 @@ fn fuzzed_exi_streams_never_panic() {
             mutated[position] = rng.next() as u8;
         }
         match decode_with_report(&mutated, &settings) {
-            Ok((xml, _)) => assert!(XmlDocument::parse(xml.as_bytes()).is_ok() || true),
+            Ok((xml, _)) => {
+                // Decoded output must not panic the parser (may still be ill-formed).
+                let _ = XmlDocument::parse(xml.as_bytes());
+            }
             Err(message) => assert!(message.contains("EXI") || message.contains("MiB")),
         }
         let _ = round;

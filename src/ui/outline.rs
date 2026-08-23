@@ -157,8 +157,7 @@ pub fn outline_contents(ui: &mut Ui, shell: &mut AppShell, show_heading: bool) {
     if let Some(target) = shell.outline_scroll_to.take()
         && let Some(index) = rows.iter().position(|row| row.node == target)
     {
-        area = area
-            .vertical_scroll_offset((index as f32 * layout.row_height - 60.0).max(0.0));
+        area = area.vertical_scroll_offset((index as f32 * layout.row_height - 60.0).max(0.0));
     }
 
     area.show_rows(ui, layout.row_height, rows.len(), |ui, range| {
@@ -304,16 +303,15 @@ fn draw_depth_guides(
     if depth == 0 {
         return;
     }
-    let guide_color = Color32::from_rgba_premultiplied(
-        border.r(),
-        border.g(),
-        border.b(),
-        border.a().min(80),
-    );
+    let guide_color =
+        Color32::from_rgba_premultiplied(border.r(), border.g(), border.b(), border.a().min(80));
     for level in 0..depth {
         let x = rect.min.x + level as f32 * layout.indent + layout.indent * 0.5;
         painter.line_segment(
-            [egui::pos2(x, rect.min.y + 2.0), egui::pos2(x, rect.max.y - 2.0)],
+            [
+                egui::pos2(x, rect.min.y + 2.0),
+                egui::pos2(x, rect.max.y - 2.0),
+            ],
             Stroke::new(1.0, guide_color),
         );
     }
@@ -328,7 +326,10 @@ fn draw_caret(
     pal: Palette,
     active: bool,
 ) {
-    let center = egui::pos2(layout.caret_center_x(row.depth) + rect.min.x, rect.center().y);
+    let center = egui::pos2(
+        layout.caret_center_x(row.depth) + rect.min.x,
+        rect.center().y,
+    );
     if row.expandable {
         let icon = if row.expanded {
             Icons::CARET_DOWN
@@ -451,10 +452,7 @@ fn outline_context_menu(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
     let delete_meta = shell.workspace.active().map(|session| {
         let document = &session.document;
         (
-            document
-                .qname(node)
-                .map(|q| q.render())
-                .unwrap_or_default(),
+            document.qname(node).map(|q| q.render()).unwrap_or_default(),
             count_descendants(document, node),
         )
     });
@@ -463,16 +461,13 @@ fn outline_context_menu(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
         .active()
         .and_then(|session| node_path(&session.document, node));
     let xml_snippet = shell.workspace.active().and_then(|session| {
-        session
-            .document
-            .source_range(node)
-            .and_then(|range| {
-                session
-                    .document
-                    .source()
-                    .get(range.start_byte..range.end_byte)
-                    .map(|s| s.to_string())
-            })
+        session.document.source_range(node).and_then(|range| {
+            session
+                .document
+                .source()
+                .get(range.start_byte..range.end_byte)
+                .map(|s| s.to_string())
+        })
     });
 
     if ui
@@ -493,14 +488,20 @@ fn outline_context_menu(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
     }
     ui.separator();
     if ui
-        .add_enabled(edits, egui::Button::new(shell.localization.msg("outline-duplicate")))
+        .add_enabled(
+            edits,
+            egui::Button::new(shell.localization.msg("outline-duplicate")),
+        )
         .clicked()
     {
         shell.commit(Command::DuplicateSubtree { node });
         ui.close_kind(egui::UiKind::Menu);
     }
     if ui
-        .add_enabled(edits, egui::Button::new(shell.localization.msg("outline-delete")))
+        .add_enabled(
+            edits,
+            egui::Button::new(shell.localization.msg("outline-delete")),
+        )
         .clicked()
         && let Some((name, descendants)) = delete_meta
     {
@@ -543,9 +544,7 @@ pub fn handle_keyboard(ctx: &Context, shell: &mut AppShell) {
         new_index = Some(0);
     } else if input.key_pressed(egui::Key::End) {
         new_index = Some(rows.len() - 1);
-    } else if input.key_pressed(egui::Key::Enter)
-        || input.key_pressed(egui::Key::ArrowRight)
-    {
+    } else if input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::ArrowRight) {
         let row = &rows[current_index];
         if row.expandable && !row.expanded {
             expand = true;

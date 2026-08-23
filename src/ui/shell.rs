@@ -674,8 +674,9 @@ impl AppShell {
                     mode,
                     document,
                 } => {
-                    let session_id = self.workspace
-                        .add_opened(path.clone(), file_type, mode, document);
+                    let session_id =
+                        self.workspace
+                            .add_opened(path.clone(), file_type, mode, document);
                     self.expand_root_default(session_id);
                     if let Some(watcher) = self.watcher.as_mut() {
                         let _ = watcher.watch(&path);
@@ -734,7 +735,10 @@ impl AppShell {
 
     fn handle_tool_result(&mut self, payload: ToolJobResult) {
         match payload {
-            ToolJobResult::XPath { expression, outcome } => match outcome {
+            ToolJobResult::XPath {
+                expression,
+                outcome,
+            } => match outcome {
                 Ok(XPathToolOutcome::Nodes(nodes)) => {
                     let count = nodes.len();
                     let text = self.localization.msg_with(
@@ -1018,9 +1022,9 @@ impl AppShell {
                 .as_ref()
                 .map(|draft| draft.buffer.clone())
                 .unwrap_or_else(|| session.document.source().to_string());
-            let selection_path = session.selection.and_then(|node| {
-                crate::services::outline::node_path(&session.document, node)
-            });
+            let selection_path = session
+                .selection
+                .and_then(|node| crate::services::outline::node_path(&session.document, node));
             let snapshot = RecoverySnapshot {
                 title: session.display_name(),
                 path: session.path.clone(),
@@ -1156,9 +1160,9 @@ impl AppShell {
 
     /// Whether tree edits are allowed on the active session.
     pub(crate) fn tree_edits_enabled(&self) -> bool {
-        self.workspace
-            .active()
-            .is_some_and(|session| session.mode == DocumentMode::Editable && session.source_draft.is_none())
+        self.workspace.active().is_some_and(|session| {
+            session.mode == DocumentMode::Editable && session.source_draft.is_none()
+        })
     }
 
     // -----------------------------------------------------------------------

@@ -195,7 +195,10 @@ pub fn node_path(document: &XmlDocument, node: NodeId) -> Option<String> {
     chain.reverse();
     let mut path = String::new();
     for element in chain {
-        let name = document.qname(element).map(|q| q.render()).unwrap_or_default();
+        let name = document
+            .qname(element)
+            .map(|q| q.render())
+            .unwrap_or_default();
         let parent = document.parent(element).unwrap_or(NodeId::DOCUMENT);
         let index = sibling_element_index(document, parent, element, &name);
         path.push('/');
@@ -267,7 +270,10 @@ fn sibling_element_index(
         if document.kind(child) != Some(XmlNodeKind::Element) {
             continue;
         }
-        let child_name = document.qname(child).map(|q| q.render()).unwrap_or_default();
+        let child_name = document
+            .qname(child)
+            .map(|q| q.render())
+            .unwrap_or_default();
         if child_name == name {
             if child == node {
                 return index;

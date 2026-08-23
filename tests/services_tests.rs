@@ -131,7 +131,7 @@ fn threshold_documents_classify_correctly() {
     // Above the element ceiling but under the open limit: read-only.
     let mut heavy = String::from("<r>");
     for i in 0..200_001 {
-        heavy.push_str(&format!("<i{i}/>", i = i));
+        heavy.push_str(&format!("<i{i}/>"));
     }
     heavy.push_str("</r>");
     let outcome = classify_bytes(heavy.as_bytes()).unwrap();
