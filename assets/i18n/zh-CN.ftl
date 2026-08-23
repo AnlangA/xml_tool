@@ -51,12 +51,16 @@ toolbar-open-file = 打开文件
 toolbar-save-file = 保存当前文件
 toolbar-new-file = 新建文档
 toolbar-format = 格式化文档
+toolbar-show-outline = 显示大纲面板
+toolbar-show-inspector = 显示检查器面板
 
 outline-expand-all = 全部展开
 outline-collapse-all = 全部折叠
 outline-duplicate = 重复节点
 outline-delete = 删除节点
 outline-empty = 暂无内容
+outline-copy-xpath = 复制 XPath
+outline-copy-xml = 复制 XML 片段
 
 inspector-qname = 名称
 inspector-namespace = 命名空间 URI
@@ -177,6 +181,7 @@ shortcut-next-match = 下一个结果
 shortcut-prev-match = 上一个结果
 shortcut-cycle-focus = 切换焦点
 shortcut-help-key = 快捷键帮助
+shortcut-tree-nav = 树：方向键导航，Enter/右箭头展开，左箭头折叠，空格切换
 
 error-parse-failed = 文档解析失败
 error-io = 文件错误：{ $message }

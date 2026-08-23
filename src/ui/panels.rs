@@ -8,12 +8,12 @@
 //! light/dark theme.
 
 use egui::{
-    Align2, CentralPanel, Context, CornerRadius, FontId, Frame, Margin, RichText, ScrollArea,
-    Sense, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui, Window, vec2,
+    CentralPanel, Context, CornerRadius, Frame, Margin, RichText, ScrollArea, Sense, Stroke,
+    TextEdit, TopBottomPanel, Ui, Window, vec2,
 };
 
 use crate::core::Command;
-use crate::core::document::{NodeId, XmlNodeKind};
+use crate::core::document::NodeId;
 use crate::fluent_args;
 use crate::services::search::SearchHit;
 use crate::services::workspace::DocumentMode;
@@ -25,12 +25,9 @@ use crate::ui::syntax_highlighter::SyntaxHighlighter;
 use crate::ui::theme::{Palette, Spacing, Typography};
 use crate::ui::theme_prefs::ThemeMode;
 
-pub const OUTLINE_MIN_WIDTH: f32 = 260.0;
-pub const OUTLINE_MAX_WIDTH: f32 = 420.0;
+pub const OUTLINE_MIN_WIDTH: f32 = crate::ui::outline::OUTLINE_MIN_WIDTH;
+pub const OUTLINE_MAX_WIDTH: f32 = crate::ui::outline::OUTLINE_MAX_WIDTH;
 pub const INSPECTOR_WIDTH: f32 = 320.0;
-const OUTLINE_ROW_HEIGHT: f32 = 20.0;
-const OUTLINE_INDENT: f32 = 14.0;
-const OUTLINE_ARROW_WIDTH: f32 = 18.0;
 /// Above this many characters the source view skips syntax highlighting so
 /// huge documents stay responsive.
 const HIGHLIGHT_CHAR_LIMIT: usize = 200_000;
@@ -99,7 +96,7 @@ pub(crate) fn section_label(ui: &mut Ui, text: String) {
 }
 
 /// Ghost toolbar button: flat at rest, framed on hover, fixed hit size.
-fn toolbar_button(ui: &mut Ui, icon: &str, tooltip: String) -> egui::Response {
+pub(crate) fn toolbar_button(ui: &mut Ui, icon: &str, tooltip: String) -> egui::Response {
     toolbar_button_enabled(ui, icon, tooltip, true)
 }
 
@@ -114,7 +111,7 @@ fn toolbar_button_enabled(
 }
 
 /// Full form: enabled flag plus a selected (toggled-on) highlight.
-fn toolbar_button_full(
+pub(crate) fn toolbar_button_full(
     ui: &mut Ui,
     icon: &str,
     tooltip: String,
@@ -132,7 +129,7 @@ fn toolbar_button_full(
 }
 
 /// Tooltip text with an optional keyboard shortcut suffix.
-fn with_shortcut(tooltip: String, shortcut: &str) -> String {
+pub(crate) fn with_shortcut(tooltip: String, shortcut: &str) -> String {
     format!("{tooltip} ({shortcut})")
 }
 
@@ -425,6 +422,31 @@ fn toolbar(ui: &mut Ui, shell: &mut AppShell) {
                 ui.add(egui::Spinner::new().size(16.0));
             });
         }
+        let narrow = ui.ctx().content_rect().width() < 850.0;
+        if narrow && has_session {
+            if toolbar_button_full(
+                ui,
+                Icons::TREE_STRUCTURE,
+                shell.localization.msg("toolbar-show-outline"),
+                true,
+                shell.show_outline_drawer,
+            )
+            .clicked()
+            {
+                shell.show_outline_drawer = !shell.show_outline_drawer;
+            }
+            if toolbar_button_full(
+                ui,
+                Icons::SLIDERS_HORIZONTAL,
+                shell.localization.msg("toolbar-show-inspector"),
+                true,
+                shell.show_inspector_drawer,
+            )
+            .clicked()
+            {
+                shell.show_inspector_drawer = !shell.show_inspector_drawer;
+            }
+        }
     }
 }
 
@@ -505,164 +527,8 @@ pub fn document_tabs(ctx: &Context, shell: &mut AppShell) {
 }
 
 // ---------------------------------------------------------------------------
-// Left: outline + search
+// Left: outline + search (implemented in outline.rs)
 // ---------------------------------------------------------------------------
-
-pub fn outline_panel(ctx: &Context, shell: &mut AppShell) {
-    SidePanel::left("outline")
-        .resizable(true)
-        .min_width(OUTLINE_MIN_WIDTH)
-        .max_width(OUTLINE_MAX_WIDTH)
-        .show(ctx, |ui| {
-            outline_contents(ui, shell);
-        });
-}
-
-fn outline_contents(ui: &mut Ui, shell: &mut AppShell) {
-    panel_heading(
-        ui,
-        Icons::TREE_STRUCTURE,
-        shell.localization.msg("panel-outline"),
-    );
-    ui.horizontal(|ui| {
-        if ui
-            .small_button(shell.localization.msg("outline-expand-all"))
-            .clicked()
-            && let Some(session) = shell.workspace.active_id()
-        {
-            shell.expand_all(session);
-        }
-        if ui
-            .small_button(shell.localization.msg("outline-collapse-all"))
-            .clicked()
-            && let Some(session) = shell.workspace.active_id()
-        {
-            shell.collapse_all(session);
-        }
-    });
-    search_box(ui, shell);
-
-    let pal = Palette::resolve(ui.ctx());
-    let Some(session) = shell.workspace.active() else {
-        ui.label(RichText::new(shell.localization.msg("panel-empty")).color(pal.text_muted));
-        return;
-    };
-    if session.mode == DocumentMode::LargeReadOnly {
-        ui.label(
-            RichText::new(shell.localization.msg("readonly-reason"))
-                .color(pal.warning)
-                .small(),
-        );
-    }
-
-    let session_id = session.id;
-    let (rows, _) = shell.outline_snapshot();
-    let rows = rows.rows;
-    let mut toggle = None;
-    let mut select = None;
-    let search_node = shell.search.selected_node();
-    let selection = shell.workspace.active().and_then(|s| s.selection);
-    let body_font = egui::TextStyle::Body.resolve(ui.style());
-    let arrow_font = FontId::proportional(body_font.size - 1.0);
-
-    // One-shot scroll (search-hit reveal): aim a bit above the row so some
-    // context stays visible.
-    let mut area = ScrollArea::vertical().auto_shrink([false, false]);
-    if let Some(target) = shell.outline_scroll_to.take()
-        && let Some(index) = rows.iter().position(|row| row.node == target)
-    {
-        area = area.vertical_scroll_offset((index as f32 * OUTLINE_ROW_HEIGHT - 60.0).max(0.0));
-    }
-
-    area.show_rows(ui, OUTLINE_ROW_HEIGHT, rows.len(), |ui, range| {
-        for row in &rows[range] {
-            let (rect, response) = ui.allocate_exact_size(
-                vec2(ui.available_width().max(1.0), OUTLINE_ROW_HEIGHT),
-                Sense::click(),
-            );
-            let is_selected = selection == Some(row.node) || search_node == Some(row.node);
-            let painter = ui.painter_at(rect);
-            if is_selected {
-                painter.rect_filled(rect, CornerRadius::same(4), pal.selection);
-                painter.rect_filled(
-                    egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
-                    CornerRadius::ZERO,
-                    pal.accent,
-                );
-            } else if response.hovered() {
-                painter.rect_filled(rect, CornerRadius::same(4), pal.hover_bg);
-            }
-
-            let indent = (row.depth as f32) * OUTLINE_INDENT;
-            if row.expandable {
-                let arrow = if row.expanded { "▾" } else { "▸" };
-                painter.text(
-                    egui::pos2(
-                        rect.min.x + indent + OUTLINE_ARROW_WIDTH * 0.5,
-                        rect.center().y,
-                    ),
-                    Align2::CENTER_CENTER,
-                    arrow,
-                    arrow_font.clone(),
-                    pal.text_secondary,
-                );
-            }
-
-            let kind = shell
-                .workspace
-                .active()
-                .and_then(|s| s.document.kind(row.node));
-            let label_text = shell
-                .workspace
-                .active()
-                .map(|s| row_label(&s.document, row.node))
-                .unwrap_or_default();
-            let name_color = match kind {
-                Some(XmlNodeKind::Comment) => pal.comment,
-                Some(XmlNodeKind::Text) | Some(XmlNodeKind::CData) => pal.text_secondary,
-                Some(XmlNodeKind::ProcessingInstruction) => pal.syntax_keyword,
-                _ => pal.element_name,
-            };
-            let color = if is_selected {
-                pal.text_highlight
-            } else {
-                name_color
-            };
-            painter.text(
-                egui::pos2(rect.min.x + indent + OUTLINE_ARROW_WIDTH, rect.center().y),
-                Align2::LEFT_CENTER,
-                label_text,
-                body_font.clone(),
-                color,
-            );
-
-            if response.double_clicked() {
-                toggle = Some(row.node);
-            } else if response.clicked() {
-                let arrow_zone_end = rect.min.x + indent + OUTLINE_ARROW_WIDTH;
-                let on_arrow = row.expandable
-                    && response
-                        .interact_pointer_pos()
-                        .is_some_and(|pos| pos.x <= arrow_zone_end);
-                if on_arrow {
-                    toggle = Some(row.node);
-                } else {
-                    select = Some(row.node);
-                }
-            }
-        }
-    });
-
-    if let Some(node) = toggle {
-        shell.toggle_expanded(session_id, node);
-    }
-    if let Some(node) = select {
-        if let Some(session) = shell.workspace.active_mut() {
-            session.selection = Some(node);
-        }
-        shell.focus = FocusPane::Inspector;
-    }
-}
 
 /// Overlay inspector drawer for narrow windows.
 pub fn inspector_drawer(ctx: &Context, shell: &mut AppShell) {
@@ -679,44 +545,7 @@ pub fn inspector_drawer(ctx: &Context, shell: &mut AppShell) {
         });
 }
 
-fn row_label(document: &crate::core::document::XmlDocument, node: NodeId) -> String {
-    match document.kind(node) {
-        Some(XmlNodeKind::Element) => {
-            let mut text = document.qname(node).map(|q| q.render()).unwrap_or_default();
-            for (name, value) in document.attributes(node) {
-                let shown: String = value.chars().take(24).collect();
-                text.push_str(&format!(" {name}=\"{shown}\""));
-            }
-            text
-        }
-        Some(XmlNodeKind::Text) | Some(XmlNodeKind::CData) => document
-            .node_text(node)
-            .unwrap_or_default()
-            .trim()
-            .chars()
-            .take(40)
-            .collect(),
-        Some(XmlNodeKind::Comment) => {
-            let shown: String = document
-                .comment_text(node)
-                .unwrap_or_default()
-                .chars()
-                .take(40)
-                .collect();
-            format!("<!-- {shown} -->")
-        }
-        Some(XmlNodeKind::ProcessingInstruction) => match document.pi(node) {
-            Some((target, data)) => match data {
-                Some(data) => format!("<?{target} {data}?>"),
-                None => format!("<?{target}?>"),
-            },
-            None => String::new(),
-        },
-        _ => String::new(),
-    }
-}
-
-fn search_box(ui: &mut Ui, shell: &mut AppShell) {
+pub(crate) fn search_box(ui: &mut Ui, shell: &mut AppShell) {
     if !shell.search.open {
         return;
     }
@@ -787,22 +616,6 @@ fn search_box(ui: &mut Ui, shell: &mut AppShell) {
     if replace_requested {
         shell.replace_all();
     }
-}
-
-/// Overlay outline drawer for narrow windows: an anchored frameless
-/// window drawn above the central panel.
-pub fn outline_drawer(ctx: &Context, shell: &mut AppShell) {
-    let height = ctx.content_rect().height();
-    Window::new("outline-drawer")
-        .title_bar(false)
-        .movable(false)
-        .resizable(false)
-        .collapsible(false)
-        .anchor(egui::Align2::LEFT_TOP, [0.0, 0.0])
-        .fixed_size([OUTLINE_MIN_WIDTH, height])
-        .show(ctx, |ui| {
-            outline_contents(ui, shell);
-        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,7 +1002,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
                             crate::core::Severity::Info => (pal.info, Icons::INFO),
                         };
                         let row_id = ui.id().with(("alert-row", alert.sequence));
-                        let clickable = alert.position.is_some();
+                        let clickable = alert.position.is_some() || alert.outline_node.is_some();
                         let hovered = clickable
                             && ui
                                 .ctx()
@@ -1244,7 +1057,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
                             );
                             let response = ui.interact(click_rect, row_id, Sense::click());
                             if response.clicked() {
-                                jump = Some((alert.position, alert.session));
+                                jump = Some((alert.position, alert.session, alert.outline_node));
                             }
                             response.on_hover_text(shell.localization.msg("problems-jump"));
                         }
@@ -1266,7 +1079,7 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
     if clear_all {
         shell.alerts.clear();
     }
-    if let Some((position, session)) = jump {
+    if let Some((position, session, outline_node)) = jump {
         // Jump belongs to the alert's session: switch to its tab first.
         if let Some(session) = session
             && let Some(index) = shell
@@ -1277,7 +1090,9 @@ pub fn bottom_panel(ctx: &Context, shell: &mut AppShell) {
         {
             shell.workspace.select(index);
         }
-        if let Some(position) = position {
+        if let Some(node) = outline_node {
+            shell.reveal_outline_node(node);
+        } else if let Some(position) = position {
             let owner = session
                 .or_else(|| shell.workspace.active_id())
                 .unwrap_or(crate::services::task_manager::SessionId(0));

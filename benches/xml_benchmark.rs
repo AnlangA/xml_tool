@@ -17,7 +17,7 @@ fn generate_xml(depth: usize, breadth: usize) -> String {
                 i,
                 generate_node(depth, breadth, current_depth + 1)
             ));
-            children.push_str(&format!("</child_{}>", i));
+            children.push_str(&format!("</child_{i}>"));
         }
 
         children

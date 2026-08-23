@@ -40,9 +40,7 @@ fn locales_have_identical_key_sets() {
     let missing_in_english: Vec<_> = chinese.difference(&english).collect();
     assert!(
         missing_in_chinese.is_empty() && missing_in_english.is_empty(),
-        "zh missing {:?}; en missing {:?}",
-        missing_in_chinese,
-        missing_in_english
+        "zh missing {missing_in_chinese:?}; en missing {missing_in_english:?}"
     );
 }
 
@@ -75,6 +73,9 @@ fn combo_shell(language: Language, theme: ThemeMode) -> AppShell {
     shell.localization.set_language(language);
     shell.theme_mode = theme;
     shell.new_document(); // one untitled tab so every panel has content
+    // Narrow layouts use the outline drawer; keep it open so headless
+    // probes can find the panel without pointer interaction.
+    shell.show_outline_drawer = true;
     shell
 }
 
@@ -124,26 +125,37 @@ fn ui_renders_in_all_twelve_combinations() {
                     Language::Chinese => "大纲",
                 };
                 assert!(
-                    !harness
+                    harness
                         .query_all_by_label_contains(outline)
                         .next()
-                        .is_none(),
+                        .is_some(),
                     "{combo}: outline panel missing"
                 );
                 // Pixel snapshot: compare against the stored baseline; on
                 // hosts without any renderer (plain software CI images)
                 // degrade to the structural assertions above.
-                let result = harness.try_snapshot(format!(
+                let snapshot_name = format!(
                     "shell-{}x{}-{}-{}",
                     width,
                     height,
                     language_tag(language),
                     theme_tag(theme)
-                ));
-                if let Err(egui_kittest::SnapshotError::RenderError { .. }) = &result {
-                    // No renderer available: structural coverage only.
-                } else {
-                    result.expect("snapshot matches the stored baseline");
+                );
+                let snapshot_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        harness.try_snapshot(snapshot_name)
+                    }));
+                match snapshot_result {
+                    Ok(result) => {
+                        if let Err(egui_kittest::SnapshotError::RenderError { .. }) = &result {
+                            // No renderer available: structural coverage only.
+                        } else {
+                            result.expect("snapshot matches the stored baseline");
+                        }
+                    }
+                    Err(_) => {
+                        // Renderer adapter missing: structural coverage only.
+                    }
                 }
             }
         }
@@ -165,10 +177,10 @@ fn narrow_windows_keep_controls_in_bounds() {
         "menu in bounds"
     );
     assert!(
-        !harness
+        harness
             .query_all_by_label_contains("Outline")
             .next()
-            .is_none(),
+            .is_some(),
         "outline stays reachable at 800×500"
     );
 }
@@ -182,7 +194,7 @@ fn chinese_menu_renders_with_cjk_font() {
     harness.set_size(egui::vec2(1280.0, 800.0));
     harness.run();
     assert!(harness.query_by_label("文件").is_some());
-    assert!(!harness.query_all_by_label_contains("大纲").next().is_none());
+    assert!(harness.query_all_by_label_contains("大纲").next().is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -225,14 +237,14 @@ fn f1_opens_shortcut_help() {
     );
     harness.run();
     assert!(
-        !harness
+        harness
             .query_all_by_label_contains("Keyboard")
             .next()
-            .is_none()
-            || !harness
+            .is_some()
+            || harness
                 .query_all_by_label_contains("快捷键")
                 .next()
-                .is_none()
+                .is_some()
     );
 }
 

@@ -104,7 +104,10 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                 *keep = false;
             }
         }
-        Dialog::XPathQuery { expression } => {
+        Dialog::XPathQuery {
+            expression,
+            results,
+        } => {
             let mut buffer = expression.clone();
             let field_id = ui.id().with("xpath-field");
             let response = ui.add(
@@ -113,7 +116,6 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .hint_text("//element[@attr='value']")
                     .desired_width(f32::INFINITY),
             );
-            // Grab focus when the dialog opens; Enter runs the query.
             if ui.ctx().memory(|memory| memory.focused().is_none()) {
                 ui.ctx().memory_mut(|memory| memory.request_focus(field_id));
             }
@@ -130,7 +132,25 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
             });
             if run {
                 shell.execute_xpath(&buffer);
-                *keep = false;
+                *expression = buffer;
+                return;
+            }
+            if let Some(nodes) = results {
+                ui.separator();
+                ui.label(shell.localization.msg_with(
+                    "xpath-result-nodes",
+                    Some(&fluent_args!("count" => nodes.len() as i32)),
+                ));
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for hit in nodes {
+                            if ui.selectable_label(false, &hit.label).clicked() {
+                                shell.reveal_outline_node(hit.node);
+                                *keep = false;
+                            }
+                        }
+                    });
             }
             *expression = buffer;
         }
@@ -245,7 +265,7 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                     .button(shell.localization.msg("dialog-recovery-open"))
                     .clicked()
                 {
-                    for (session_id, snapshot) in snapshots.clone() {
+                    for (_session_id, snapshot) in snapshots.clone() {
                         if let Ok(document) =
                             crate::core::document::XmlDocument::parse(snapshot.source.as_bytes())
                         {
@@ -255,10 +275,20 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                                 .path
                                 .clone()
                                 .filter(|path| !path.as_os_str().is_empty());
-                            shell.workspace.add_restored(path, document);
+                            let session_id = shell.workspace.add_restored(path, document);
+                            shell.expand_root_default(session_id);
+                            if let Some(path) = snapshot.selection_path.as_deref()
+                                && let Some(session) = shell.workspace.active()
+                                && let Some(node) = crate::services::outline::node_from_path(
+                                    &session.document,
+                                    path,
+                                )
+                            {
+                                shell.reveal_outline_node(node);
+                            }
                             // Restored: the snapshot must not prompt again on
                             // the next launch.
-                            shell.recovery.remove(session_id);
+                            shell.recovery.remove(session_id.0);
                         }
                     }
                     *keep = false;
@@ -289,6 +319,7 @@ fn dialog_body(ui: &mut Ui, shell: &mut AppShell, dialog: &mut Dialog, keep: &mu
                 "shortcut-prev-match",
                 "shortcut-cycle-focus",
                 "shortcut-help-key",
+                "shortcut-tree-nav",
             ] {
                 ui.label(shell.localization.msg(key));
             }

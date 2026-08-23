@@ -51,12 +51,16 @@ toolbar-open-file = Open a file
 toolbar-save-file = Save the current file
 toolbar-new-file = Create a new document
 toolbar-format = Format the document
+toolbar-show-outline = Show outline panel
+toolbar-show-inspector = Show inspector panel
 
 outline-expand-all = Expand all
 outline-collapse-all = Collapse all
 outline-duplicate = Duplicate node
 outline-delete = Delete node
 outline-empty = Nothing to show
+outline-copy-xpath = Copy XPath
+outline-copy-xml = Copy XML fragment
 
 inspector-qname = Name
 inspector-namespace = Namespace URI
@@ -177,6 +181,7 @@ shortcut-next-match = Next match
 shortcut-prev-match = Previous match
 shortcut-cycle-focus = Cycle focus
 shortcut-help-key = Shortcut help
+shortcut-tree-nav = Tree: arrow keys navigate, Enter/Right expand, Left collapse, Space toggle
 
 error-parse-failed = Failed to parse document
 error-io = File error: { $message }

@@ -247,7 +247,10 @@ fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
 }
 
 /// Counts the node's subtree descendants (shown in the delete dialog).
-fn count_descendants(document: &crate::core::document::XmlDocument, node: NodeId) -> usize {
+pub(crate) fn count_descendants(
+    document: &crate::core::document::XmlDocument,
+    node: NodeId,
+) -> usize {
     document
         .children(node)
         .into_iter()
