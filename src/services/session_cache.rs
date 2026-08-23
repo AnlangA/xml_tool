@@ -7,6 +7,7 @@
 //! evicted LRU-first against the 128 MiB budget.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::core::document::{NodeId, XmlDocument};
 use crate::services::outline::FlatTree;
@@ -27,7 +28,7 @@ pub struct CacheStats {
 
 /// One cached flattened outline.
 pub struct OutlineEntry {
-    pub tree: FlatTree,
+    pub tree: Arc<FlatTree>,
     pub elements: usize,
 }
 
@@ -129,7 +130,7 @@ impl DocumentSessionCache {
             self.outlines.insert(
                 (session, revision, expansion),
                 OutlineEntry {
-                    tree,
+                    tree: Arc::new(tree),
                     elements: document.document_order().len().saturating_sub(1),
                 },
             );

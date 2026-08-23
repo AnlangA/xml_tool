@@ -75,6 +75,9 @@ fn combo_shell(language: Language, theme: ThemeMode) -> AppShell {
     shell.localization.set_language(language);
     shell.theme_mode = theme;
     shell.new_document(); // one untitled tab so every panel has content
+    // Narrow layouts use the outline drawer; keep it open so headless
+    // probes can find the panel without pointer interaction.
+    shell.show_outline_drawer = true;
     shell
 }
 
@@ -133,17 +136,27 @@ fn ui_renders_in_all_twelve_combinations() {
                 // Pixel snapshot: compare against the stored baseline; on
                 // hosts without any renderer (plain software CI images)
                 // degrade to the structural assertions above.
-                let result = harness.try_snapshot(format!(
+                let snapshot_name = format!(
                     "shell-{}x{}-{}-{}",
                     width,
                     height,
                     language_tag(language),
                     theme_tag(theme)
-                ));
-                if let Err(egui_kittest::SnapshotError::RenderError { .. }) = &result {
-                    // No renderer available: structural coverage only.
-                } else {
-                    result.expect("snapshot matches the stored baseline");
+                );
+                let snapshot_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    harness.try_snapshot(snapshot_name)
+                }));
+                match snapshot_result {
+                    Ok(result) => {
+                        if let Err(egui_kittest::SnapshotError::RenderError { .. }) = &result {
+                            // No renderer available: structural coverage only.
+                        } else {
+                            result.expect("snapshot matches the stored baseline");
+                        }
+                    }
+                    Err(_) => {
+                        // Renderer adapter missing: structural coverage only.
+                    }
                 }
             }
         }

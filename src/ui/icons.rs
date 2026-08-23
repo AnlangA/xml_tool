@@ -25,6 +25,7 @@ impl Icons {
     pub const TREE_STRUCTURE: &'static str = regular::TREE_STRUCTURE;
     pub const SLIDERS_HORIZONTAL: &'static str = regular::SLIDERS_HORIZONTAL;
     pub const CARET_DOWN: &'static str = regular::CARET_DOWN;
+    pub const CARET_RIGHT: &'static str = regular::CARET_RIGHT;
 }
 
 /// Loads the Phosphor regular variant into the given definitions.

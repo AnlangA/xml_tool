@@ -24,6 +24,8 @@ pub struct Alert {
     pub position: Option<(usize, usize)>,
     /// Session the alert belongs to; jump-to-source switches to its tab.
     pub session: Option<crate::services::task_manager::SessionId>,
+    /// Outline node to reveal when the alert is clicked (XPath hits).
+    pub outline_node: Option<crate::core::document::NodeId>,
     /// How many times this alert fired (dedup counter).
     pub count: u32,
     /// Monotonic frame-stamp when first seen (oldest-first ordering).
@@ -85,13 +87,24 @@ impl AlertCenter {
         self.push_with_position(severity, code, message, None);
     }
 
-    /// Records an alert with an optional 1-based (line, column).
-    pub fn push_with_position(
+    /// Records an alert with an optional outline node (XPath node-set hits).
+    pub fn push_with_outline_node(
+        &mut self,
+        severity: Severity,
+        code: &str,
+        message: &str,
+        outline_node: Option<crate::core::document::NodeId>,
+    ) {
+        self.push_full(severity, code, message, None, outline_node);
+    }
+
+    fn push_full(
         &mut self,
         severity: Severity,
         code: &str,
         message: &str,
         position: Option<(usize, usize)>,
+        outline_node: Option<crate::core::document::NodeId>,
     ) {
         if let Some(existing) = self
             .alerts
@@ -102,6 +115,9 @@ impl AlertCenter {
             if position.is_some() {
                 existing.position = position;
             }
+            if outline_node.is_some() {
+                existing.outline_node = outline_node;
+            }
         } else {
             self.evict_if_full();
             self.alerts.push(Alert {
@@ -110,6 +126,7 @@ impl AlertCenter {
                 message: message.to_string(),
                 position,
                 session: self.session,
+                outline_node,
                 count: 1,
                 sequence: self.next_sequence,
             });
@@ -123,6 +140,17 @@ impl AlertCenter {
         if severity == Severity::Error {
             self.panel_requested = true;
         }
+    }
+
+    /// Records an alert with an optional 1-based (line, column).
+    pub fn push_with_position(
+        &mut self,
+        severity: Severity,
+        code: &str,
+        message: &str,
+        position: Option<(usize, usize)>,
+    ) {
+        self.push_full(severity, code, message, position, None);
     }
 
     /// Records a diagnostic (line/column arguments carry the position).

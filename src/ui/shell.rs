@@ -43,9 +43,10 @@ const TOOLS_SESSION: SessionId = SessionId(u64::MAX - 5);
 /// Modal dialogs the shell can show.
 pub enum Dialog {
     About,
-    /// XPath query entry (expression buffer).
+    /// XPath query entry (expression buffer + optional node-set results).
     XPathQuery {
         expression: String,
+        results: Option<Vec<crate::services::xpath::XPathNode>>,
     },
     /// EXI workbench: chosen preset plus the last report line.
     ExiWorkbench {
@@ -122,9 +123,11 @@ pub struct AppShell {
     prefs_applied: Option<(ThemeMode, FontScale, egui::Theme)>,
     /// Fonts are installed once per context, not per frame.
     fonts_installed: bool,
-    /// Narrow-layout drawers (default open so panels stay reachable).
+    /// Narrow-layout drawers (outline closed by default on narrow windows).
     pub show_outline_drawer: bool,
     pub show_inspector_drawer: bool,
+    /// Collapse the search strip inside the outline panel.
+    pub outline_search_collapsed: bool,
     /// What the unsaved-changes dialog continues with when confirmed.
     pub(crate) after_unsaved: Option<AfterUnsaved>,
     /// Paths we saved recently: watcher events for these are our own
@@ -162,8 +165,9 @@ impl AppShell {
             frames: crate::services::frame_observer::FrameObserver::default(),
             prefs_applied: None,
             fonts_installed: false,
-            show_outline_drawer: true,
+            show_outline_drawer: false,
             show_inspector_drawer: true,
+            outline_search_collapsed: false,
             after_unsaved: None,
             recent_saves: HashMap::new(),
             last_recovery_write: std::time::Instant::now(),
@@ -394,7 +398,8 @@ impl AppShell {
 
     /// Creates a new untitled document.
     pub fn new_document(&mut self) {
-        self.workspace.add_untitled();
+        let session_id = self.workspace.add_untitled();
+        self.expand_root_default(session_id);
     }
 
     /// Saves the active document in a background job. The bytes saved are
@@ -669,8 +674,9 @@ impl AppShell {
                     mode,
                     document,
                 } => {
-                    self.workspace
+                    let session_id = self.workspace
                         .add_opened(path.clone(), file_type, mode, document);
+                    self.expand_root_default(session_id);
                     if let Some(watcher) = self.watcher.as_mut() {
                         let _ = watcher.watch(&path);
                     }
@@ -728,13 +734,23 @@ impl AppShell {
 
     fn handle_tool_result(&mut self, payload: ToolJobResult) {
         match payload {
-            ToolJobResult::XPath { outcome } => match outcome {
-                Ok(XPathToolOutcome::Nodes(count)) => {
+            ToolJobResult::XPath { expression, outcome } => match outcome {
+                Ok(XPathToolOutcome::Nodes(nodes)) => {
+                    let count = nodes.len();
                     let text = self.localization.msg_with(
                         "xpath-result-nodes",
                         Some(&crate::fluent_args!("count" => count as i32)),
                     );
-                    self.push_problem(Severity::Info, "xpath", text);
+                    self.alerts.push_with_outline_node(
+                        Severity::Info,
+                        "xpath",
+                        &text,
+                        nodes.first().map(|n| n.node),
+                    );
+                    self.dialog = Some(Dialog::XPathQuery {
+                        expression,
+                        results: Some(nodes),
+                    });
                 }
                 Ok(XPathToolOutcome::Text(value)) => {
                     self.push_problem(Severity::Info, "xpath", value);
@@ -1002,13 +1018,16 @@ impl AppShell {
                 .as_ref()
                 .map(|draft| draft.buffer.clone())
                 .unwrap_or_else(|| session.document.source().to_string());
+            let selection_path = session.selection.and_then(|node| {
+                crate::services::outline::node_path(&session.document, node)
+            });
             let snapshot = RecoverySnapshot {
                 title: session.display_name(),
                 path: session.path.clone(),
                 source,
                 dirty: true,
                 cursor: 0,
-                selection_path: None,
+                selection_path,
                 written_at: 0, // stamped by the store
             };
             let _ = self.recovery.write(session.id.0, &snapshot);
@@ -1028,7 +1047,7 @@ impl AppShell {
         let has_document = self.workspace.active().is_some();
 
         if has_document && outline_inline {
-            panels::outline_panel(ctx, self);
+            crate::ui::outline::outline_panel(ctx, self);
         }
         if has_document && inspector_inline {
             panels::inspector_panel(ctx, self);
@@ -1037,7 +1056,7 @@ impl AppShell {
         // Narrow windows: panels become overlay drawers (drawn after and
         // above the central panel).
         if has_document && !outline_inline && self.show_outline_drawer {
-            panels::outline_drawer(ctx, self);
+            crate::ui::outline::outline_drawer(ctx, self);
         }
         if has_document && !inspector_inline && self.show_inspector_drawer {
             panels::inspector_drawer(ctx, self);
@@ -1046,9 +1065,9 @@ impl AppShell {
 
     /// Cached outline snapshot (rows + element count) for the active
     /// session under the current expansion state.
-    pub(crate) fn outline_snapshot(&mut self) -> (crate::services::outline::FlatTree, usize) {
+    pub(crate) fn outline_snapshot(&mut self) -> (Arc<crate::services::outline::FlatTree>, usize) {
         let Some(session) = self.workspace.active() else {
-            return (crate::services::outline::FlatTree::default(), 0);
+            return (Arc::new(crate::services::outline::FlatTree::default()), 0);
         };
         let expanded = self.expanded.get(&session.id).cloned().unwrap_or_default();
         let expansion = crate::services::session_cache::expansion_digest(&expanded);
@@ -1059,7 +1078,75 @@ impl AppShell {
         let entry = self
             .cache
             .outline(session_id, revision, expansion, document, &expanded);
-        (entry.tree.clone(), entry.elements)
+        (Arc::clone(&entry.tree), entry.elements)
+    }
+
+    /// Expands the root element for a session (first-open default).
+    pub(crate) fn expand_root_default(&mut self, session: SessionId) {
+        if let Some(session_ref) = self.workspace.sessions().iter().find(|s| s.id == session)
+            && let Some(root) = session_ref.document.root_element()
+        {
+            self.expanded.entry(session).or_default().insert(root);
+        }
+    }
+
+    /// Reveals `node` in the outline: ancestors expanded, row scrolled, inspector focused.
+    pub(crate) fn reveal_outline_node(&mut self, node: NodeId) {
+        let Some(session_id) = self.workspace.active_id() else {
+            return;
+        };
+        if let Some(session) = self.workspace.active() {
+            let mut ancestors = Vec::new();
+            let mut current = node;
+            while let Some(parent) = session.document.parent(current) {
+                if parent == NodeId::DOCUMENT {
+                    break;
+                }
+                ancestors.push(parent);
+                current = parent;
+            }
+            self.expanded
+                .entry(session_id)
+                .or_default()
+                .extend(ancestors);
+            if let Some(range) = session.document.source_range(node) {
+                self.source_jump = Some((session_id, range.start_line, range.start_column));
+                self.pending_scroll = Some((session_id, range.start_line, range.start_column));
+            }
+        }
+        if let Some(session) = self.workspace.active_mut() {
+            session.selection = Some(node);
+        }
+        self.outline_scroll_to = Some(node);
+        self.focus = FocusPane::Inspector;
+    }
+
+    pub(crate) fn toggle_expanded(&mut self, session: SessionId, node: NodeId) {
+        let Some(document) = self
+            .workspace
+            .sessions()
+            .iter()
+            .find(|s| s.id == session)
+            .map(|s| &s.document)
+        else {
+            return;
+        };
+        let set = self.expanded.entry(session).or_default();
+        crate::services::outline::FlatTree::toggle(document, set, node);
+    }
+
+    pub(crate) fn expand_all(&mut self, session: SessionId) {
+        let Some(current) = self.workspace.sessions().iter().find(|s| s.id == session) else {
+            return;
+        };
+        self.expanded.insert(
+            session,
+            crate::services::outline::FlatTree::collect_expandable(&current.document),
+        );
+    }
+
+    pub(crate) fn collapse_all(&mut self, session: SessionId) {
+        self.expanded.insert(session, HashSet::new());
     }
 
     /// Element count for the status bar.
@@ -1067,28 +1154,11 @@ impl AppShell {
         self.outline_snapshot().1
     }
 
-    pub(crate) fn toggle_expanded(&mut self, session: SessionId, node: NodeId) {
-        let set = self.expanded.entry(session).or_default();
-        if !set.insert(node) {
-            set.remove(&node);
-        }
-    }
-
-    pub(crate) fn expand_all(&mut self, session: SessionId) {
-        let Some(current) = self.workspace.sessions().iter().find(|s| s.id == session) else {
-            return;
-        };
-        let all: HashSet<NodeId> = current
-            .document
-            .document_order()
-            .iter()
-            .map(|&id| NodeId(id))
-            .collect();
-        self.expanded.insert(session, all);
-    }
-
-    pub(crate) fn collapse_all(&mut self, session: SessionId) {
-        self.expanded.insert(session, HashSet::new());
+    /// Whether tree edits are allowed on the active session.
+    pub(crate) fn tree_edits_enabled(&self) -> bool {
+        self.workspace
+            .active()
+            .is_some_and(|session| session.mode == DocumentMode::Editable && session.source_draft.is_none())
     }
 
     // -----------------------------------------------------------------------
@@ -1182,6 +1252,9 @@ impl AppShell {
         }
         if wants(KeyboardShortcut::new(Modifiers::NONE, Key::F1)) {
             self.dialog = Some(Dialog::Shortcuts);
+        }
+        if self.focus == FocusPane::Outline && !text_editing {
+            crate::ui::outline::handle_keyboard(ctx, self);
         }
     }
 
@@ -1341,6 +1414,7 @@ impl AppShell {
     pub fn run_xpath_dialog(&mut self) {
         self.dialog = Some(Dialog::XPathQuery {
             expression: String::new(),
+            results: None,
         });
     }
 
@@ -1359,7 +1433,7 @@ impl AppShell {
                     crate::services::xpath::query(&document, &expression)
                         .map(|outcome| match outcome {
                             crate::services::xpath::XPathOutcome::NodeSet(nodes) => {
-                                XPathToolOutcome::Nodes(nodes.len())
+                                XPathToolOutcome::Nodes(nodes)
                             }
                             crate::services::xpath::XPathOutcome::String(value) => {
                                 XPathToolOutcome::Text(value)
@@ -1373,7 +1447,10 @@ impl AppShell {
                         })
                         .map_err(|err| err.to_string())
                 })();
-                Box::new(ToolJobResult::XPath { outcome })
+                Box::new(ToolJobResult::XPath {
+                    expression,
+                    outcome,
+                })
             });
     }
 
@@ -1490,6 +1567,7 @@ pub enum DialogPick {
 /// snapshot; the UI thread only formats and presents).
 pub enum ToolJobResult {
     XPath {
+        expression: String,
         outcome: Result<XPathToolOutcome, String>,
     },
     Validate {
@@ -1506,7 +1584,7 @@ pub enum ToolJobResult {
 
 /// UI-ready XPath result.
 pub enum XPathToolOutcome {
-    Nodes(usize),
+    Nodes(Vec<crate::services::xpath::XPathNode>),
     Text(String),
 }
 

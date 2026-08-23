@@ -10,12 +10,10 @@ pub mod fonts;
 pub mod icons;
 pub mod inspector;
 pub mod localization;
+pub mod outline;
 pub mod panels;
 pub mod shell;
 pub mod syntax_highlighter;
 pub mod theme;
 pub mod theme_prefs;
-#[allow(dead_code)]
-pub mod virtual_list;
-
 pub use shell::{AppShell, FocusPane};
