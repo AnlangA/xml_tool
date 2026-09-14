@@ -1,0 +1,101 @@
+# Packaging workflow — MANUAL DISPATCH ONLY.
+#
+# Produces platform installers (Windows MSI, macOS .app/.dmg, Linux
+# .deb/AppImage). Signing and notarization require repository secrets
+# (APPLE_CERTIFICATE, APPLE_ID, WINDOWS_SIGNING) that must be configured
+# before dispatch. Per AGENTS_PLAN.md, release actions (tags, uploads,
+# publishing) need explicit authorization and are NOT automated here.
+
+name: package
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Release notes"
+        required: false
+        default: ""
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: .deb package
+        run: |
+          mkdir -p pkg/DEBIAN pkg/usr/bin
+          cp target/release/xml_tool pkg/usr/bin/
+          cat > pkg/DEBIAN/control <<CONTROL
+          Package: xml-tool
+          Version: ${GITHUB_REF_NAME#v}
+          Section: editors
+          Priority: optional
+          Architecture: amd64
+          Maintainer: XML Tool Contributors
+          Description: Professional XML/EXI editor
+          CONTROL
+          dpkg-deb --build pkg xml-tool_${GITHUB_REF_NAME#v}_amd64.deb
+      - name: AppImage
+        run: |
+          curl -sL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o linuxdeploy
+          chmod +x linuxdeploy
+          mkdir -p AppDir/usr/bin && cp target/release/xml_tool AppDir/usr/bin/
+          ./linuxdeploy --appdir AppDir --output appimage \
+            -d <(echo '[Desktop Entry]
+          Type=Application
+          Name=XML Tool
+          Exec=xml_tool
+          Comment=Professional XML/EXI editor')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            *.deb
+            *.AppImage
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: MSI package
+        shell: pwsh
+        run: |
+          # WiX-based MSI; requires wixtoolset (choco install wixtoolset).
+          # Placeholder that stages the binary until WiX lands with the
+          # icon and license resources.
+          New-Item -ItemType Directory -Force -Path msi-stage
+          Copy-Item target/release/xml_tool.exe msi-stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-stage
+          path: msi-stage/
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: .app bundle and dmg
+        run: |
+          # Signing/notarization require APPLE_* secrets; unsigned builds
+          # are produced when they are absent.
+          mkdir -p "XML Tool.app/Contents/MacOS"
+          cp target/aarch64-apple-darwin/release/xml_tool "XML Tool.app/Contents/MacOS/"
+          hdiutil create -volname "XML Tool" -srcfolder "XML Tool.app" -ov "XML-Tool.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: XML-Tool.dmg

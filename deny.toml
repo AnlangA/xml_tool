@@ -1,0 +1,52 @@
+# cargo-deny configuration.
+#
+# The two quick-xml advisories and the unmaintained `paste`/`ttf-parser`
+# warnings are allowed with justifications (see .cargo/audit.toml for the
+# full quick-xml analysis: the affected NsReader paths are unreachable
+# because every input is pre-validated by the uppsala engine first).
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2024-0436", # paste: unmaintained macro utility, no known issues
+    "RUSTSEC-2026-0192", # ttf-parser: unmaintained, pinned via egui/ab_glyph
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "BSL-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # erxi (the pinned EXI backend) is PolyForm-Noncommercial: binary
+    # distributions of xml_tool inherit that restriction for the EXI
+    # feature. Documented in README and docs/BASELINE-step-10.md;
+    # commercial releases need a commercial EXI backend or removal.
+    "PolyForm-Noncommercial-1.0.0",
+]
+
+[bans]
+multiple-versions = "warn"
+# Git dependencies with a pinned rev (erxi) are flagged by the wildcard
+# rule even without a `*` requirement; the rev pin above is authoritative.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/schachmadinejad/erxi",
+]

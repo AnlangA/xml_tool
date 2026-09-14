@@ -1,6 +1,6 @@
 [package]
 name = "xml_tool"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["XML Tool Contributors"]
@@ -10,16 +10,17 @@ keywords = ["xml", "exi", "viewer", "editor", "gui"]
 categories = ["gui", "parsing", "visualization"]
 
 [dependencies]
-# XML parsing
-quick-xml = "0.41"
+# XML engine: arena DOM, namespaces, XPath, XSD, source ranges, PullParser
+uppsala = "=0.9.0"
 
 # EXI (Efficient XML Interchange) encoding/decoding
-erxi = { git = "https://github.com/schachmadinejad/erxi", default-features = false }
+# EXI backend, pinned to the plan's fixed commit. PolyForm-Noncommercial
+# licensed: see README "Licensing" for distribution implications.
+erxi = { git = "https://github.com/schachmadinejad/erxi", rev = "4148209c3fb11786ee81b54861e6f6d421905043", default-features = false }
 
 # GUI framework
 eframe = "0.33.3"
 egui = "0.33.3"
-egui_extras = { version = "0.33.3", features = ["image"] }
 
 # Base64 image previews
 base64 = "0.22"
@@ -31,26 +32,42 @@ rfd = "0.15"
 # Theme
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 
-# Performance optimization
-parking_lot = "0.12"
-lru = "0.18"
+# Icons (icon-name constants only; font loading is ours)
+egui-phosphor = "=0.11.0"
 
-# Icons
-egui-phosphor = { version = "0.7", optional = true }
+# Runtime localization (Fluent)
+fluent-bundle = "0.16.0"
+unic-langid = "0.9"
+sys-locale = "0.3"
 
 # Export formats
 serde_json = "1.0"
 
 # Utilities
-thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 
+# External file-change monitoring
+notify = "8.2.0"
+
+# Rope-based source buffers (clones share the underlying tree)
+ropey = "1.6.1"
+
+# Sequence diff for structural XML comparison
+similar = "=3.1.1"
+
+# SHA-256 digests for EXI reports
+sha2 = "0.10"
+
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3.13"
+tempfile = "3.27"
+egui_kittest = { version = "0.33.3", features = ["snapshot", "wgpu"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3

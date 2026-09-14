@@ -4,12 +4,17 @@ use egui::{ColorImage, RichText, TextureHandle, TextureOptions};
 
 use crate::utils::format_size;
 
+use super::localization::Localization;
+use super::theme::Palette;
+use crate::core::Revision;
 #[cfg(test)]
-use super::image_conversion::MAX_PREVIEW_TEXTURE_SIDE;
-use super::image_conversion::{
+use crate::services::image_conversion::MAX_PREVIEW_TEXTURE_SIDE;
+use crate::services::image_conversion::{
     ImageFileFormat as PreviewImageFormat, MAX_DECODED_BYTES, decode_image_bytes, is_esi_icon,
 };
-use super::theme::Theme;
+use crate::services::task_manager::{JobId, SessionId, TaskManager};
+use std::sync::Arc;
+const PREVIEW_SESSION: SessionId = SessionId(u64::MAX - 7);
 
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENCODED_CHARS: usize = MAX_DECODED_BYTES.div_ceil(3) * 4;
@@ -51,6 +56,7 @@ enum Detection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewKey {
+    session: u64,
     node_id: u64,
     text_revision: u64,
 }
@@ -69,6 +75,7 @@ struct RenderedPreview {
 enum PreviewState {
     #[default]
     Hidden,
+    Loading,
     Ready(RenderedPreview),
     Error(String),
 }
@@ -78,45 +85,68 @@ enum PreviewState {
 /// Decoding happens only when the selection or text revision changes, rather than
 /// on every egui frame.
 #[derive(Default)]
-pub(super) struct EncodedImagePreview {
+pub(crate) struct EncodedImagePreview {
+    tasks: Arc<TaskManager>,
+    worker: Option<JobId>,
     key: Option<PreviewKey>,
     state: PreviewState,
 }
 
 impl EncodedImagePreview {
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn with_tasks(tasks: Arc<TaskManager>) -> Self {
+        Self {
+            tasks,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        if let Some(job) = self.worker.take() {
+            self.tasks.cancel(job);
+        }
         self.key = None;
         self.state = PreviewState::Hidden;
     }
 
-    pub(super) fn show(
+    pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
-        node_id: u64,
-        text_revision: u64,
+        identity: (u64, u64, u64),
         element_name: &str,
         source: &str,
         previewing_unapplied_text: bool,
+        loc: &Localization,
     ) {
+        let pal = Palette::resolve(ui.ctx());
         let key = PreviewKey {
-            node_id,
-            text_revision,
+            session: identity.0,
+            node_id: identity.1,
+            text_revision: identity.2,
         };
         if self.key != Some(key) {
             self.rebuild(ui.ctx(), key, element_name, source);
         }
 
+        self.poll(ui.ctx());
         match &self.state {
             PreviewState::Hidden => {}
+            PreviewState::Loading => {
+                ui.spinner();
+                ui.label(loc.msg("icon-preview-loading"));
+            }
             PreviewState::Ready(preview) => {
                 ui.add_space(10.0);
                 egui::Frame::new()
-                    .fill(Theme::CARD_BG)
+                    .fill(pal.card_bg)
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("Image Preview").strong().color(Theme::INFO));
+                            ui.label(
+                                RichText::new(loc.msg("icon-preview"))
+                                    .strong()
+                                    .color(pal.info),
+                            );
                             ui.separator();
                             ui.label(
                                 RichText::new(format!(
@@ -128,21 +158,21 @@ impl EncodedImagePreview {
                                     format_size(preview.encoded_bytes),
                                 ))
                                 .small()
-                                .color(Theme::TEXT_MUTED),
+                                .color(pal.text_muted),
                             );
                         });
 
                         if previewing_unapplied_text {
                             ui.label(
-                                RichText::new("Previewing unapplied text")
+                                RichText::new(loc.msg("icon-preview-draft"))
                                     .small()
                                     .italics()
-                                    .color(Theme::WARNING),
+                                    .color(pal.warning),
                             );
                         }
 
                         if let Some(warning) = &preview.warning {
-                            ui.label(RichText::new(warning).small().color(Theme::WARNING));
+                            ui.label(RichText::new(warning).small().color(pal.warning));
                         }
 
                         ui.add_space(8.0);
@@ -156,8 +186,8 @@ impl EncodedImagePreview {
                             ui.add(
                                 egui::Image::from_texture(&preview.texture)
                                     .fit_to_exact_size(display_size)
-                                    .bg_fill(Theme::SURFACE1)
-                                    .alt_text("Encoded image preview"),
+                                    .bg_fill(pal.input_bg)
+                                    .alt_text(loc.msg("icon-preview")),
                             );
                         });
                     });
@@ -165,54 +195,95 @@ impl EncodedImagePreview {
             PreviewState::Error(message) => {
                 ui.add_space(10.0);
                 egui::Frame::new()
-                    .fill(Theme::ERROR_BG)
+                    .fill(pal.error_bg)
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
-                        ui.label(RichText::new("Image Preview").strong().color(Theme::ERROR));
-                        ui.label(RichText::new(message).small().color(Theme::TEXT_SECONDARY));
+                        ui.label(
+                            RichText::new(loc.msg("icon-preview"))
+                                .strong()
+                                .color(pal.error),
+                        );
+                        ui.label(RichText::new(message).small().color(pal.text_secondary));
                     });
             }
         }
     }
 
     fn rebuild(&mut self, ctx: &egui::Context, key: PreviewKey, element_name: &str, source: &str) {
+        if let Some(job) = self.worker.take() {
+            self.tasks.cancel(job);
+        }
         self.key = Some(key);
-        let runtime_texture_side = ctx.input(|input| input.max_texture_side);
-        let runtime_texture_side = u32::try_from(runtime_texture_side).unwrap_or(u32::MAX);
+        if source.len() > MAX_SOURCE_BYTES {
+            self.state = PreviewState::Error(format!(
+                "Encoded image text is limited to {}.",
+                format_size(MAX_SOURCE_BYTES)
+            ));
+            return;
+        }
+        self.state = PreviewState::Loading;
+        let side = ctx.input(|input| u32::try_from(input.max_texture_side).unwrap_or(u32::MAX));
         let use_ethercat_transparency = is_esi_icon(element_name);
-        self.state = match detect_encoded_image_for_texture(
-            source,
-            runtime_texture_side,
-            use_ethercat_transparency,
-        ) {
-            Detection::NotImage => PreviewState::Hidden,
-            Detection::Error(message) => PreviewState::Error(message),
-            Detection::Ready(decoded) => {
-                let texture_options = if decoded.width <= 64 && decoded.height <= 64 {
-                    TextureOptions::NEAREST
-                } else {
-                    TextureOptions::LINEAR
-                };
-                let texture = ctx.load_texture(
-                    format!(
-                        "encoded-image-preview-{}-{}",
-                        key.node_id, key.text_revision
-                    ),
-                    decoded.image,
-                    texture_options,
-                );
-                PreviewState::Ready(RenderedPreview {
-                    texture,
-                    format: decoded.format,
-                    encoding: decoded.encoding,
-                    width: decoded.width,
-                    height: decoded.height,
-                    encoded_bytes: decoded.encoded_bytes,
-                    warning: decoded.warning,
+        let source = source.to_owned();
+        let ctx = ctx.clone();
+        self.worker = Some(
+            self.tasks
+                .spawn(PREVIEW_SESSION, Revision(0), move |_| {
+                    let result =
+                        detect_encoded_image_for_texture(&source, side, use_ethercat_transparency);
+                    ctx.request_repaint();
+                    Box::new(result)
                 })
+                .0,
+        );
+    }
+
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+        while let Ok(Some(outcome)) = self.tasks.take_outcome(PREVIEW_SESSION, Revision(0)) {
+            if self.worker != Some(outcome.job) {
+                continue;
             }
-        };
+            self.worker = None;
+            let Some(key) = self.key else {
+                continue;
+            };
+            let result = *outcome
+                .result
+                .downcast::<Detection>()
+                .expect("image preview job");
+            self.state = match result {
+                Detection::NotImage => PreviewState::Hidden,
+                Detection::Error(message) => PreviewState::Error(message),
+                Detection::Ready(decoded) => {
+                    let texture_options = if decoded.width <= 64 && decoded.height <= 64 {
+                        TextureOptions::NEAREST
+                    } else {
+                        TextureOptions::LINEAR
+                    };
+                    let texture = ctx.load_texture(
+                        format!(
+                            "encoded-image-preview-{}-{}",
+                            key.node_id, key.text_revision
+                        ),
+                        decoded.image,
+                        texture_options,
+                    );
+                    PreviewState::Ready(RenderedPreview {
+                        texture,
+                        format: decoded.format,
+                        encoding: decoded.encoding,
+                        width: decoded.width,
+                        height: decoded.height,
+                        encoded_bytes: decoded.encoded_bytes,
+                        warning: decoded.warning,
+                    })
+                }
+            };
+        }
+        if self.worker.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -284,7 +355,7 @@ fn detect_encoded_image_for_texture(
     })
 }
 
-pub(super) fn preview_display_size(width: u32, height: u32, max_size: egui::Vec2) -> egui::Vec2 {
+pub(crate) fn preview_display_size(width: u32, height: u32, max_size: egui::Vec2) -> egui::Vec2 {
     let natural_size = egui::vec2(width as f32, height as f32);
     let fit_scale = (max_size.x / natural_size.x).min(max_size.y / natural_size.y);
     let scale = if natural_size.max_elem() < 96.0 {
@@ -543,8 +614,8 @@ fn decode_payload(payload: &[u8]) -> Result<Vec<u8>, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::image_conversion::MAX_IMAGE_DIMENSION;
     use super::*;
+    use crate::services::image_conversion::MAX_IMAGE_DIMENSION;
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
     use std::io::Cursor;
 
@@ -850,9 +921,15 @@ mod tests {
 
         let _ = context.run(Default::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                renderer.show(ui, 7, 1, "image", &first, false);
+                renderer.show(ui, (1, 7, 1), "image", &first, false, &Localization::new());
             });
         });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while renderer.worker.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll(&context);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(
             matches!(&renderer.state, PreviewState::Ready(preview) if (preview.width, preview.height) == (2, 1))
         );
@@ -860,9 +937,15 @@ mod tests {
         let second = STANDARD.encode(image_bytes(ImageFormat::Png, 1, 2));
         let _ = context.run(Default::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                renderer.show(ui, 7, 2, "image", &second, true);
+                renderer.show(ui, (1, 7, 2), "image", &second, true, &Localization::new());
             });
         });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while renderer.worker.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll(&context);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(
             matches!(&renderer.state, PreviewState::Ready(preview) if (preview.width, preview.height) == (1, 2))
         );

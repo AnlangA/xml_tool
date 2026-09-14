@@ -2,9 +2,15 @@ use eframe::egui;
 use xml_tool::XmlToolApp;
 
 fn main() -> eframe::Result<()> {
-    // Log to stderr for debugging
+    // Log to stderr for debugging. `sctk_adwaita` (Wayland window
+    // decorations) and `zbus` (XDG portal D-Bus chatter around the file
+    // dialog) both spam harmless warnings — keep them at error level so
+    // real warnings stay visible.
     #[cfg(debug_assertions)]
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,sctk_adwaita=error,zbus=error"),
+    )
+    .init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -1,16 +1,18 @@
-mod base64_image;
-pub mod file_dialog;
-mod icon_converter;
+//! Desktop UI: the shell, its panels, and reusable widgets.
+
+pub mod alerts;
+pub mod base64_image;
+pub mod dialogs;
+pub mod fonts;
+pub(crate) mod icon_converter;
+mod icon_import;
 pub mod icons;
-mod image_conversion;
-pub mod loading_indicator;
-pub mod main_panel;
-pub mod search_bar;
-pub mod shortcuts_panel;
-pub mod status_bar;
+pub mod inspector;
+pub mod localization;
+pub mod outline;
+pub mod panels;
+pub mod shell;
 pub mod syntax_highlighter;
 pub mod theme;
-pub mod virtual_list;
-pub mod xml_tree;
-
-pub use main_panel::MainPanel;
+pub mod theme_prefs;
+pub use shell::{AppShell, FocusPane};

@@ -1,65 +1,37 @@
-use egui::ThemePreference;
+//! eframe application hosting the shell.
 
-use crate::ui::MainPanel;
+use crate::ui::shell::{AppShell, Dialog};
 
 pub struct XmlToolApp {
-    main_panel: MainPanel,
+    shell: AppShell,
 }
 
 impl XmlToolApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Set theme
-        cc.egui_ctx.set_theme(ThemePreference::Dark);
-
-        // Apply catppuccin mocha theme
-        catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::MOCHA);
-        install_system_font_fallback(&cc.egui_ctx);
-
-        Self {
-            main_panel: MainPanel::new(),
+        let mut shell = AppShell::new();
+        shell.theme_mode.apply(&cc.egui_ctx);
+        // Crash-recovery snapshots from a previous session surface as a
+        // modal choice — never an automatic overwrite of disk files.
+        let snapshots = shell.recovery.load_all();
+        if !snapshots.is_empty() {
+            shell.dialog = Some(Dialog::Recovery { snapshots });
         }
-    }
-}
-
-// egui's bundled fonts do not include CJK glyphs. Use a locally installed
-// fallback so file names and XML text remain readable without bundling a font.
-fn install_system_font_fallback(ctx: &egui::Context) {
-    #[cfg(target_os = "windows")]
-    let paths: Vec<std::path::PathBuf> = {
-        let windows = std::env::var_os("WINDIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "C:\\Windows".into());
-        ["msyh.ttc", "simhei.ttf", "simsun.ttc"]
-            .into_iter()
-            .map(|name| windows.join("Fonts").join(name))
-            .collect()
-    };
-    #[cfg(target_os = "macos")]
-    let paths: Vec<std::path::PathBuf> = vec!["/System/Library/Fonts/PingFang.ttc".into()];
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let paths: Vec<std::path::PathBuf> = vec![
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into(),
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc".into(),
-    ];
-    if let Some(bytes) = paths.iter().find_map(|path| std::fs::read(path).ok()) {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "system-cjk".into(),
-            egui::FontData::from_owned(bytes).into(),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .push("system-cjk".into());
-        }
-        ctx.set_fonts(fonts);
+        Self { shell }
     }
 }
 
 impl eframe::App for XmlToolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.main_panel.show(ctx);
+        // Intercept the window close button: with unsaved changes, cancel
+        // the close and route through the unsaved-changes dialog instead
+        // of losing edits silently.
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.shell.workspace.dirty_sessions().is_empty()
+            && !matches!(self.shell.dialog, Some(Dialog::UnsavedExit))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.shell.request_exit(ctx);
+        }
+        self.shell.update(ctx);
     }
 }

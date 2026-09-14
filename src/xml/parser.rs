@@ -1,102 +1,47 @@
-use quick_xml::XmlVersion;
-use quick_xml::events::{BytesRef, BytesText, Event};
-use quick_xml::reader::Reader;
+//! Legacy compatibility facade over the XML engine.
+//!
+//! [`parse_xml`], [`parse_xml_file`], and [`serialize_xml`] keep their
+//! historical signatures (the editable tree model plus `anyhow`), but parsing
+//! now goes through [`super::engine::UppsalaXmlEngine`] with the plan's
+//! security limits. The engine DOM is converted into the legacy tree with the
+//! same text-normalization semantics the previous `quick-xml` parser had, so
+//! existing callers and tests are unaffected.
+//!
+//! New code should use [`super::engine::parse_xml_bytes`] and friends, which
+//! preserve every XML construct and the original byte stream.
+
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use uppsala::dom::{Document, NodeId, NodeKind};
 
+use super::engine::{ParseOptions, UppsalaXmlEngine, XmlEngine};
 use super::{XmlAttribute, XmlDocument, XmlElement, XmlNode};
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Parse an XML string into an [`XmlDocument`].
+///
+/// Namespace resolution is off (matching the historical behavior) and text
+/// whitespace is normalized exactly like the previous parser.
 pub fn parse_xml(content: &str) -> Result<XmlDocument> {
-    let mut reader = Reader::from_str(content);
-
-    let mut stack: Vec<XmlElement> = Vec::new();
-    let mut root: Option<XmlNode> = None;
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-                let mut element = XmlElement::new(name);
-                collect_attributes(reader.decoder(), &e, &mut element);
-                stack.push(element);
-            }
-
-            Ok(Event::Empty(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-                let mut element = XmlElement::new(name);
-                collect_attributes(reader.decoder(), &e, &mut element);
-                attach_node(XmlNode::Element(element), &mut stack, &mut root);
-            }
-
-            Ok(Event::End(_)) => {
-                if let Some(element) = stack.pop() {
-                    attach_node(XmlNode::Element(element), &mut stack, &mut root);
-                }
-            }
-
-            Ok(Event::Text(e)) => {
-                if let Some(parent) = stack.last_mut()
-                    && let Some(text) = decode_text_event(&e)?
-                {
-                    append_text(parent, &text);
-                }
-            }
-
-            Ok(Event::CData(e)) => {
-                if let Some(parent) = stack.last_mut() {
-                    let text = e
-                        .xml_content(XmlVersion::Implicit1_0)
-                        .context("Failed to decode CDATA section")?;
-                    append_text(parent, &text);
-                }
-            }
-
-            Ok(Event::GeneralRef(e)) => {
-                if let Some(parent) = stack.last_mut() {
-                    let resolved = resolve_general_reference(&e)?;
-                    append_text(parent, &resolved);
-                }
-            }
-
-            Ok(Event::Comment(e)) => {
-                let comment = e.decode().context("Failed to decode XML comment")?;
-                if let Some(parent) = stack.last_mut() {
-                    attach_child_node(parent, XmlNode::Comment(comment.into_owned()));
-                }
-            }
-
-            Ok(Event::Eof) => break,
-
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "XML parse error at byte {}: {e:?}",
-                    reader.error_position()
-                ));
-            }
-
-            // Ignore PI, DocType, CData, etc.
-            _ => {}
-        }
-
-        buf.clear();
-    }
-
-    let root = root.context("No root element found in XML document")?;
-    Ok(XmlDocument::new(root))
+    let engine = UppsalaXmlEngine;
+    let parsed = engine
+        .parse_bytes(content.as_bytes(), &legacy_parse_options())
+        .context("Failed to parse XML")?;
+    build_legacy_tree(parsed.document())
 }
 
 /// Read a file from `path` and parse it as XML.
+///
+/// The file is read as bytes and decoded through the engine, so UTF-16
+/// (BOM or Appendix-F detected) documents open correctly.
 pub fn parse_xml_file(path: &Path) -> Result<XmlDocument> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read '{}'", path.display()))?;
-    parse_xml(&content)
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+    let engine = UppsalaXmlEngine;
+    let parsed = engine
+        .parse_bytes(&bytes, &legacy_parse_options())
+        .with_context(|| format!("Failed to parse '{}'", path.display()))?;
+    build_legacy_tree(parsed.document())
 }
 
 /// Serialise an [`XmlDocument`] back to a well-formed XML string.
@@ -107,22 +52,85 @@ pub fn serialize_xml(document: &XmlDocument) -> Result<String> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Attach `node` to the current parent, or set it as the document root.
-fn attach_node(node: XmlNode, stack: &mut [XmlElement], root: &mut Option<XmlNode>) {
-    if let Some(parent) = stack.last_mut() {
-        attach_child_node(parent, node);
-    } else {
-        *root = Some(node);
+fn legacy_parse_options() -> ParseOptions {
+    ParseOptions {
+        namespace_aware: false,
+        ..ParseOptions::default()
     }
 }
 
-fn attach_child_node(parent: &mut XmlElement, node: XmlNode) {
-    flush_pending_text(parent);
-    parent.add_child(node);
+// ---------------------------------------------------------------------------
+// Engine DOM → legacy tree conversion
+// ---------------------------------------------------------------------------
+
+/// Converts an engine DOM into the legacy tree model, preserving the old
+/// parser's semantics: comments become child nodes, CDATA and expanded
+/// entities merge into text, PIs and the doctype are skipped.
+fn build_legacy_tree(document: &Document<'_>) -> Result<XmlDocument> {
+    let root_id = document
+        .document_element()
+        .ok_or_else(|| anyhow!("No root element found in XML document"))?;
+    let root = convert_element(document, root_id)?;
+    Ok(XmlDocument::new(root))
+}
+
+fn convert_element(document: &Document<'_>, id: NodeId) -> Result<XmlNode> {
+    let element = document
+        .element(id)
+        .ok_or_else(|| anyhow!("Engine node {id:?} is not an element"))?;
+
+    let mut legacy = XmlElement::new(render_qname(&element.name));
+
+    // Namespace declarations are stored separately by the engine DOM;
+    // the legacy model carried them as plain attributes, so rebuild them.
+    for attr in &element.attributes {
+        legacy.attributes.push(XmlAttribute {
+            name: render_qname(&attr.name),
+            value: attr.value.to_string(),
+            namespace: None,
+        });
+    }
+    for (prefix, uri) in &element.namespace_declarations {
+        let name = if prefix.is_empty() {
+            String::from("xmlns")
+        } else {
+            format!("xmlns:{prefix}")
+        };
+        legacy.attributes.push(XmlAttribute {
+            name,
+            value: uri.to_string(),
+            namespace: None,
+        });
+    }
+
+    for child_id in document.children_iter(id) {
+        match document.node_kind(child_id) {
+            Some(NodeKind::Element(_)) => {
+                flush_pending_text(&mut legacy);
+                legacy.add_child(convert_element(document, child_id)?);
+            }
+            Some(NodeKind::Text(text)) => {
+                if let Some(normalized) = normalize_text_fragment(text) {
+                    append_text(&mut legacy, normalized);
+                }
+            }
+            Some(NodeKind::CData(text)) => append_text(&mut legacy, text),
+            Some(NodeKind::Comment(comment)) => {
+                flush_pending_text(&mut legacy);
+                legacy.add_child(XmlNode::Comment(comment.to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(XmlNode::Element(legacy))
+}
+
+fn render_qname(name: &uppsala::dom::QName<'_>) -> String {
+    match &name.prefix {
+        Some(prefix) => format!("{prefix}:{}", name.local_name),
+        None => name.local_name.to_string(),
+    }
 }
 
 fn flush_pending_text(parent: &mut XmlElement) {
@@ -136,31 +144,23 @@ fn flush_pending_text(parent: &mut XmlElement) {
 fn append_text(parent: &mut XmlElement, text: &str) {
     if parent.children.is_empty() {
         match &mut parent.text {
-            Some(existing) => append_text_run(existing, text),
+            Some(existing) => existing.push_str(text),
             None => parent.text = Some(text.to_string()),
         }
         return;
     }
 
     match parent.children.last_mut() {
-        Some(XmlNode::Text(existing)) => append_text_run(existing, text),
+        Some(XmlNode::Text(existing)) => existing.push_str(text),
         _ => parent.add_child(XmlNode::Text(text.to_string())),
     }
 }
 
-fn append_text_run(target: &mut String, text: &str) {
-    target.push_str(text);
-}
-
-fn decode_text_event(event: &BytesText<'_>) -> Result<Option<String>> {
-    let content = event
-        .xml_content(XmlVersion::Implicit1_0)
-        .context("Failed to decode XML text node")?;
-    Ok(normalize_text_fragment(&content).map(ToOwned::to_owned))
-}
-
+/// Mirrors the historical text normalization: whitespace-only fragments that
+/// contain line breaks are dropped; fragments with line breaks are trimmed;
+/// everything else is kept verbatim.
 fn normalize_text_fragment(text: &str) -> Option<&str> {
-    let trimmed = trim_xml_whitespace(text);
+    let trimmed = text.trim_matches(is_xml_whitespace);
     let has_line_break = text.contains('\n') || text.contains('\r');
 
     if trimmed.is_empty() {
@@ -174,72 +174,13 @@ fn normalize_text_fragment(text: &str) -> Option<&str> {
     }
 }
 
-fn trim_xml_whitespace(text: &str) -> &str {
-    text.trim_matches(is_xml_whitespace)
-}
-
 fn is_xml_whitespace(ch: char) -> bool {
     matches!(ch, ' ' | '\n' | '\r' | '\t')
 }
 
-fn resolve_general_reference(reference: &BytesRef<'_>) -> Result<String> {
-    if let Some(ch) = reference
-        .resolve_char_ref()
-        .context("Failed to resolve XML character reference")?
-    {
-        return Ok(ch.to_string());
-    }
-
-    let name = reference
-        .decode()
-        .context("Failed to decode XML entity reference")?;
-
-    let resolved = match name.as_ref() {
-        "lt" => "<",
-        "gt" => ">",
-        "amp" => "&",
-        "apos" => "'",
-        "quot" => "\"",
-        _ => {
-            return Err(anyhow!(
-                "Unsupported entity reference '&{name};' (DTD-defined entities are not supported)"
-            ));
-        }
-    };
-
-    Ok(resolved.to_string())
-}
-
-/// Extract attributes from a quick-xml `BytesStart` event into `element`.
-fn collect_attributes<'a>(
-    decoder: quick_xml::encoding::Decoder,
-    e: &quick_xml::events::BytesStart<'a>,
-    element: &mut XmlElement,
-) {
-    for attr_result in e.attributes() {
-        match attr_result {
-            Ok(attr) => {
-                let name = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-                let value =
-                    match attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder) {
-                        Ok(value) => value.into_owned(),
-                        Err(err) => {
-                            log::warn!("Skipping malformed attribute '{name}': {err}");
-                            continue;
-                        }
-                    };
-                element.attributes.push(XmlAttribute {
-                    name,
-                    value,
-                    namespace: None,
-                });
-            }
-            Err(e) => {
-                log::warn!("Skipping malformed attribute: {e}");
-            }
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Legacy tree serialization (unchanged output format)
+// ---------------------------------------------------------------------------
 
 /// Recursively write an [`XmlNode`] with indentation.
 fn write_node(node: &XmlNode, out: &mut String, depth: usize) {
@@ -435,6 +376,41 @@ mod tests {
         let root = doc.root.as_element().expect("root element");
 
         assert_eq!(root.text.as_deref(), Some("<escaped> & raw"));
+    }
+
+    #[test]
+    fn internal_entities_expand_into_text() {
+        let xml =
+            "<!DOCTYPE r [\n<!ENTITY greeting \"Hello &amp; welcome\">]>\n<r>&greeting; team</r>";
+        let doc = parse_xml(xml).expect("parse");
+        let root = doc.root.as_element().expect("root element");
+
+        assert_eq!(root.text.as_deref(), Some("Hello & welcome team"));
+    }
+
+    #[test]
+    fn engine_backed_parse_reports_line_and_column() {
+        let err = parse_xml("<a>\n  <b></c>\n</a>").unwrap_err();
+        // anyhow wraps the engine error; the root cause must carry a location.
+        let message = format!("{err:#}");
+        assert!(message.contains("line"), "message: {message}");
+    }
+
+    #[test]
+    fn parse_xml_file_reads_utf16_documents() {
+        let text = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><root><child/></root>";
+        let mut units = Vec::new();
+        units.push(0xFF); // BOM
+        units.push(0xFE);
+        for unit in text.encode_utf16() {
+            units.extend_from_slice(&unit.to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16.xml");
+        std::fs::write(&path, units).unwrap();
+
+        let doc = parse_xml_file(&path).expect("parse utf-16 file");
+        assert_eq!(doc.root.as_element().unwrap().name, "root");
     }
 
     #[test]

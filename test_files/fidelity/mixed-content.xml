@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mixed:para xmlns:mixed="urn:example:mixed">plain start <b>bold</b> middle <i>italic <u>underline</u> tail</i><!-- note --><![CDATA[ raw <text> ]]><?refresh hint="x"?> final</mixed:para>

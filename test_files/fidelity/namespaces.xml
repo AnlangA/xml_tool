@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cfg xmlns="urn:example:cfg" xmlns:a="urn:example:a" xmlns:b="urn:example:b">
+  <a:section b:visible="true">
+    <b:item a:key="one">first</b:item>
+    <item xmlns="urn:example:other" a:key="two">second</item>
+    <a:section>
+      <deep/>
+    </a:section>
+  </a:section>
+</cfg>

@@ -1,0 +1,13 @@
+[advisories]
+ignore = [
+    # quick-xml 0.39 is a transitive dependency of erxi (the pinned EXI
+    # backend). Both advisories affect NsReader paths. Every XML byte
+    # stream that reaches erxi's parser has already been fully parsed and
+    # validated by the uppsala engine (which rejects duplicate attributes
+    # and enforces the 256 MiB input cap and nesting/entity budgets), so
+    # neither the quadratic duplicate-attribute path nor unbounded
+    # namespace-declaration allocation is reachable through this
+    # application. Tracked for an upstream erxi dependency bump.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

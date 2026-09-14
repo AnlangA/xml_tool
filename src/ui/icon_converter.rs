@@ -1,28 +1,22 @@
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    mpsc::{self, Receiver, TryRecvError},
-};
+use std::sync::Arc;
 
 use egui::{Context, RichText, TextureHandle, TextureOptions};
 
 use super::base64_image::preview_display_size;
-use super::file_dialog::{FileDialogAction, FileDialogManager, FileDialogResult};
-use super::image_conversion::{
-    ConversionMode, ConvertedIcon, IconSource, ImageFileFormat, convert_icon, is_esi_icon,
-    read_icon,
+use super::localization::Localization;
+use super::theme::Palette;
+use crate::core::Revision;
+use crate::services::image_conversion::{
+    ConversionMode, ConversionNote, ConvertedIcon, IconSource, ImageFileFormat, convert_icon,
+    is_esi_icon, read_icon,
 };
-use super::theme::Theme;
+pub(crate) use crate::services::image_import::IconTarget;
+use crate::services::task_manager::{JobId, SessionId, TaskManager};
+const ICON_SESSION: SessionId = SessionId(u64::MAX - 6);
 use crate::utils::format_size;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct IconTarget {
-    pub root_id: u64,
-    pub node_id: u64,
-    pub name: String,
-}
-
-pub(super) struct IconImport {
+pub(crate) struct IconImport {
     pub target: IconTarget,
     pub mode: ConversionMode,
     pub text: Arc<str>,
@@ -33,9 +27,18 @@ enum IconInput {
     Loaded(IconSource),
 }
 
-struct ConversionReply {
-    source: Option<IconSource>,
-    result: Result<ConvertedIcon, String>,
+enum FileDialogResult {
+    OpenImage(Option<PathBuf>),
+    SaveIconText(Option<PathBuf>),
+}
+enum IconJob {
+    Converted {
+        source: Option<IconSource>,
+        result: Result<ConvertedIcon, String>,
+    },
+    #[cfg(not(target_os = "macos"))]
+    Dialog(FileDialogResult),
+    Saved(Result<PathBuf, String>),
 }
 
 struct ReadyIcon {
@@ -44,19 +47,21 @@ struct ReadyIcon {
     height: u32,
     texture: TextureHandle,
     text: Arc<str>,
-    note: Option<String>,
+    note: Option<ConversionNote>,
 }
 
 #[derive(Default)]
-pub(super) struct IconConverter {
+pub(crate) struct IconConverter {
     visible: bool,
     target: Option<IconTarget>,
     mode: ConversionMode,
     source: Option<IconSource>,
     ready: Option<ReadyIcon>,
-    worker: Option<Receiver<ConversionReply>>,
-    save_worker: Option<Receiver<Result<PathBuf, String>>>,
-    file_dialog: FileDialogManager,
+    tasks: Arc<TaskManager>,
+    worker: Option<JobId>,
+    save_worker: Option<JobId>,
+    dialog_job: Option<JobId>,
+    saved_path: Option<PathBuf>,
     pending_export: Option<Arc<str>>,
     generation: u64,
     dialog_generation: u64,
@@ -65,7 +70,20 @@ pub(super) struct IconConverter {
 }
 
 impl IconConverter {
-    pub(super) fn open(&mut self, target: Option<IconTarget>, ctx: &Context) {
+    pub(crate) fn with_tasks(tasks: Arc<TaskManager>) -> Self {
+        Self {
+            tasks,
+            ..Default::default()
+        }
+    }
+
+    fn cancel_conversion(&mut self) {
+        if let Some(job) = self.worker.take() {
+            self.tasks.cancel(job);
+        }
+    }
+
+    pub(crate) fn open(&mut self, target: Option<IconTarget>, ctx: &Context) {
         self.generation = self.generation.wrapping_add(1);
         self.visible = true;
         self.mode = if target.as_ref().is_some_and(|t| is_esi_icon(&t.name)) {
@@ -74,7 +92,7 @@ impl IconConverter {
             ConversionMode::Base64
         };
         self.target = target;
-        self.worker = None;
+        self.cancel_conversion();
         self.ready = None;
         self.error = None;
         self.status = None;
@@ -83,27 +101,26 @@ impl IconConverter {
         }
     }
 
-    pub(super) fn sync_target(&mut self, current: Option<&IconTarget>) {
+    pub(crate) fn sync_target(&mut self, current: Option<&IconTarget>) {
         if self
             .target
             .as_ref()
             .is_some_and(|target| Some(target) != current)
         {
             self.target = None;
-            self.status = Some("Import target changed. Reopen Import Icon on the desired leaf element. You can still copy or save this conversion.".into());
+            self.status = Some("icon-target-changed".into());
         }
     }
 
     fn close(&mut self) {
         self.visible = false;
         self.target = None;
-        self.worker = None;
+        self.cancel_conversion();
         self.generation = self.generation.wrapping_add(1);
     }
 
-    // Each request owns a separate channel. Replacing/dropping its receiver
-    // ensures a late result can never overwrite a newer conversion.
     fn start_conversion(&mut self, input: IconInput, ctx: &Context) {
+        self.cancel_conversion();
         self.ready = None;
         self.error = None;
         self.status = None;
@@ -111,32 +128,70 @@ impl IconConverter {
             IconInput::File(_) => None,
             IconInput::Loaded(source) => Some(source.clone()),
         };
-        let (tx, rx) = mpsc::channel();
-        self.worker = Some(rx);
         let mode = self.mode;
         let side = ctx.input(|i| u32::try_from(i.max_texture_side).unwrap_or(u32::MAX));
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let source = match input {
-                IconInput::Loaded(source) => Ok(source),
-                IconInput::File(path) => read_icon(&path),
+        self.worker = Some(
+            self.tasks
+                .spawn(ICON_SESSION, Revision(0), move |_| {
+                    let source = match input {
+                        IconInput::Loaded(source) => Ok(source),
+                        IconInput::File(path) => read_icon(&path),
+                    };
+                    let reply = match source {
+                        Ok(source) => {
+                            let result = convert_icon(&source, mode, side);
+                            IconJob::Converted {
+                                source: Some(source),
+                                result,
+                            }
+                        }
+                        Err(error) => IconJob::Converted {
+                            source: None,
+                            result: Err(error),
+                        },
+                    };
+                    ctx.request_repaint();
+                    Box::new(reply)
+                })
+                .0,
+        );
+    }
+
+    fn pick_file(&mut self, save: bool, ctx: &Context, loc: &Localization) {
+        if self.dialog_job.is_some() {
+            return;
+        }
+        self.dialog_generation = self.generation;
+        let title = loc.msg(if save { "icon-save" } else { "icon-choose" });
+        #[cfg(target_os = "macos")]
+        {
+            let path = crate::services::image_conversion::pick_icon_path(save, &title);
+            let result = if save {
+                FileDialogResult::SaveIconText(path)
+            } else {
+                FileDialogResult::OpenImage(path)
             };
-            let reply = match source {
-                Ok(source) => {
-                    let result = convert_icon(&source, mode, side);
-                    ConversionReply {
-                        source: Some(source),
-                        result,
-                    }
-                }
-                Err(error) => ConversionReply {
-                    source: None,
-                    result: Err(error),
-                },
-            };
-            let _ = tx.send(reply);
-            ctx.request_repaint();
-        });
+            self.handle_dialog_result(result, ctx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let ctx = ctx.clone();
+            self.dialog_job = Some(
+                self.tasks
+                    .spawn(ICON_SESSION, Revision(0), move |_| {
+                        let path = crate::services::image_conversion::pick_icon_path(save, &title);
+                        let result = if save {
+                            FileDialogResult::SaveIconText(path)
+                        } else {
+                            FileDialogResult::OpenImage(path)
+                        };
+                        ctx.request_repaint();
+                        Box::new(IconJob::Dialog(result))
+                    })
+                    .0,
+            );
+        }
     }
 
     fn handle_dialog_result(&mut self, result: FileDialogResult, ctx: &Context) {
@@ -144,40 +199,43 @@ impl IconConverter {
             FileDialogResult::OpenImage(Some(path))
                 if self.visible && self.dialog_generation == self.generation =>
             {
-                self.start_conversion(IconInput::File(path), ctx);
+                self.start_conversion(IconInput::File(path), ctx)
             }
             FileDialogResult::SaveIconText(Some(path)) => {
                 if let Some(text) = self.pending_export.take() {
-                    let (tx, rx) = mpsc::channel();
-                    self.save_worker = Some(rx);
                     let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        let result = std::fs::write(&path, text.as_bytes())
-                            .map(|()| path)
-                            .map_err(|e| format!("Cannot save encoded text: {e}"));
-                        let _ = tx.send(result);
-                        ctx.request_repaint();
-                    });
+                    self.save_worker = Some(
+                        self.tasks
+                            .spawn(ICON_SESSION, Revision(0), move |_| {
+                                let result =
+                                    crate::services::image_conversion::save_icon_text(&path, &text)
+                                        .map(|()| path);
+                                ctx.request_repaint();
+                                Box::new(IconJob::Saved(result))
+                            })
+                            .0,
+                    );
                 }
             }
             FileDialogResult::SaveIconText(None) => {
                 self.pending_export = None;
-                self.status = Some("Text save cancelled.".into());
+                self.status = Some("icon-save-cancelled".into());
             }
             _ => {}
         }
     }
 
     fn poll(&mut self, ctx: &Context) {
-        if let Some(result) = self.file_dialog.poll() {
-            self.handle_dialog_result(result, ctx);
-        }
-        if let Some(rx) = &self.worker {
-            match rx.try_recv() {
-                Ok(reply) => {
+        while let Ok(Some(outcome)) = self.tasks.take_outcome(ICON_SESSION, Revision(0)) {
+            match *outcome
+                .result
+                .downcast::<IconJob>()
+                .expect("icon job payload")
+            {
+                IconJob::Converted { source, result } if self.worker == Some(outcome.job) => {
                     self.worker = None;
-                    self.source = reply.source;
-                    match reply.result {
+                    self.source = source;
+                    match result {
                         Ok(converted) => {
                             let image = converted.decoded;
                             let options = if image.width <= 64 && image.height <= 64 {
@@ -201,71 +259,69 @@ impl IconConverter {
                         Err(error) => self.error = Some(error),
                     }
                 }
-                Err(TryRecvError::Disconnected) => {
-                    self.worker = None;
-                    self.error = Some(
-                        "Image conversion stopped unexpectedly. Choose the file again.".into(),
-                    );
+                #[cfg(not(target_os = "macos"))]
+                IconJob::Dialog(result) if self.dialog_job == Some(outcome.job) => {
+                    self.dialog_job = None;
+                    self.handle_dialog_result(result, ctx);
                 }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-        if let Some(rx) = &self.save_worker {
-            match rx.try_recv() {
-                Ok(result) => {
+                IconJob::Saved(result) if self.save_worker == Some(outcome.job) => {
                     self.save_worker = None;
                     match result {
                         Ok(path) => {
-                            self.status = Some(format!("Saved encoded text: {}", path.display()))
+                            self.saved_path = Some(path);
+                            self.status = Some("icon-saved".into());
                         }
                         Err(error) => self.error = Some(error),
                     }
                 }
-                Err(TryRecvError::Disconnected) => {
-                    self.save_worker = None;
-                    self.error = Some("Text save stopped unexpectedly. Please retry.".into());
-                }
-                Err(TryRecvError::Empty) => {}
+                _ => {}
             }
         }
-        if self.worker.is_some() || self.save_worker.is_some() || self.file_dialog.is_pending() {
+        if self.worker.is_some() || self.save_worker.is_some() || self.dialog_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
-    pub(super) fn show(&mut self, ctx: &Context, has_text_draft: bool) -> Option<IconImport> {
+    pub(crate) fn show(
+        &mut self,
+        ctx: &Context,
+        has_text_draft: bool,
+        loc: &Localization,
+    ) -> Option<IconImport> {
         self.poll(ctx);
+        let pal = Palette::resolve(ctx);
         if !self.visible {
             return None;
         }
         let mut open = true;
         let mut import = None;
+        let mut save_requested = false;
         let screen = ctx.content_rect();
-        let response = egui::Window::new("Icon Converter")
+        let response = egui::Window::new(loc.msg("icon-title"))
             .id(egui::Id::new("icon_converter"))
             .open(&mut open)
             .default_width(560.0)
-            .default_height(420.0)
+            .default_height(520.0)
             .min_width(280.0)
             .max_width((screen.width() - 32.0).max(280.0))
             .max_height((screen.height() - 48.0).max(200.0))
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label("Choose an image or drop one file anywhere in this window.");
+                ui.label(loc.msg("icon-drop-hint"));
                 ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(!self.file_dialog.is_pending() && self.worker.is_none(), egui::Button::new("Choose Image…")).clicked() {
+                    if ui.add_enabled(self.dialog_job.is_none() && self.worker.is_none(), egui::Button::new(loc.msg("icon-choose"))).clicked() {
                         self.dialog_generation = self.generation;
-                        self.file_dialog.open(FileDialogAction::OpenImage);
+                        self.pick_file(false, ctx, loc);
                     }
-                    ui.label(RichText::new("PNG · JPEG · GIF · WebP · BMP · ICO | max 8 MiB").small().color(Theme::TEXT_MUTED));
+                    ui.label(RichText::new(loc.msg("icon-formats")).small().color(pal.text_muted));
                 });
                 ui.add_space(8.0);
                 let previous_mode = self.mode;
                 ui.add_enabled_ui(self.worker.is_none(), |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("Output:");
+                        ui.label(loc.msg("icon-output"));
                         for mode in [ConversionMode::Base64, ConversionMode::DataUri, ConversionMode::EsiHex] {
-                            ui.selectable_value(&mut self.mode, mode, mode.label());
+                            ui.selectable_value(&mut self.mode, mode, loc.msg(match mode { ConversionMode::Base64 => "icon-base64", ConversionMode::DataUri => "icon-data-uri", ConversionMode::EsiHex => "icon-esi" }));
                         }
                     });
                 });
@@ -277,69 +333,72 @@ impl IconConverter {
                     }
                 }
                 if self.mode == ConversionMode::EsiHex {
-                    ui.label(RichText::new("Creates a 16x14, 16-color BMP (4bpp). Fits the image with transparent padding; magenta (#FF00FF) is transparent.").small().color(Theme::INFO));
+                    ui.label(RichText::new(loc.msg("icon-esi-hint")).small().color(pal.info));
                 } else {
-                    ui.label(RichText::new("Encodes the original file bytes without changing the image.").small().color(Theme::TEXT_MUTED));
+                    ui.label(RichText::new(loc.msg("icon-original-hint")).small().color(pal.text_muted));
                 }
                 ui.separator();
                 if let Some(source) = &self.source {
                     ui.label(RichText::new(&source.name).strong());
-                    ui.label(format!("File size: {}", format_size(source.bytes.len())));
+                    ui.label(loc.msg_with("icon-file-size", Some(&crate::fluent_args!("size" => format_size(source.bytes.len())))));
                 }
                 if self.worker.is_some() {
-                    ui.horizontal(|ui| { ui.spinner(); ui.label("Reading and converting image…"); });
+                    ui.horizontal(|ui| { ui.spinner(); ui.label(loc.msg("icon-loading")); });
                 }
-                if self.save_worker.is_some() { ui.label("Saving encoded text…"); }
-                if let Some(error) = &self.error { ui.colored_label(Theme::ERROR, error); }
+                if self.save_worker.is_some() { ui.label(loc.msg("icon-saving")); }
+                if let Some(error) = &self.error { ui.colored_label(pal.error, if error.starts_with("icon-") { loc.msg(error) } else { loc.msg_with("icon-error", Some(&crate::fluent_args!("message" => error.as_str()))) }); }
                 if let Some(ready) = &self.ready {
                     if let Some(note) = &ready.note {
-                        ui.label(RichText::new(note).small().color(Theme::INFO));
+                        ui.label(RichText::new(conversion_note(note, loc)).small().color(pal.info));
                     }
-                    ui.label(format!("{} | {}x{} | {} characters", ready.format.label(), ready.width, ready.height, ready.text.len()));
+                    ui.label(loc.msg_with("icon-summary", Some(&crate::fluent_args!("format" => ready.format.label(), "width" => ready.width, "height" => ready.height, "count" => ready.text.len() as i64))));
                     let size = preview_display_size(ready.width, ready.height, egui::vec2(ui.available_width().max(1.0), 160.0));
-                    ui.add(egui::Image::from_texture(&ready.texture).fit_to_exact_size(size).bg_fill(Theme::SURFACE1));
+                    ui.add(egui::Image::from_texture(&ready.texture).fit_to_exact_size(size).bg_fill(pal.input_bg));
                     if matches!(ready.format, ImageFileFormat::Gif | ImageFileFormat::WebP | ImageFileFormat::Ico) {
-                        ui.label(RichText::new("Preview shows the decoder's default frame/icon. The complete original file is preserved.").small().color(Theme::TEXT_MUTED));
+                        ui.label(RichText::new(loc.msg("icon-frame-note")).small().color(pal.text_muted));
                     }
-                    ui.collapsing("Encoded text", |ui| {
+                    ui.collapsing(loc.msg("icon-encoded"), |ui| {
                         let mut excerpt = &ready.text[..ready.text.len().min(4096)];
                         egui::ScrollArea::vertical().id_salt("icon_encoded_text").max_height(100.0).show(ui, |ui| {
                             ui.add(egui::TextEdit::multiline(&mut excerpt).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(4));
                         });
-                        if ready.text.len() > 4096 { ui.label("Showing the first 4096 characters. Copy and Save include the full result."); }
+                        if ready.text.len() > 4096 { ui.label(loc.msg("icon-excerpt")); }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Copy").clicked() {
+                        if ui.button(loc.msg("icon-copy")).clicked() {
                             ctx.copy_text(ready.text.to_string());
-                            self.status = Some("Complete encoded text copied.".into());
+                            self.status = Some("icon-copied".into());
                         }
-                        if ui.add_enabled(!self.file_dialog.is_pending() && self.save_worker.is_none(), egui::Button::new("Save Text…")).clicked() {
+                        if ui.add_enabled(self.dialog_job.is_none() && self.save_worker.is_none(), egui::Button::new(loc.msg("icon-save"))).clicked() {
                             // Freeze the exact output chosen now, even if the mode changes while saving.
                             self.pending_export = Some(ready.text.clone());
-                            self.file_dialog.open(FileDialogAction::SaveIconText);
+                            save_requested = true;
                         }
                     });
                     ui.separator();
                     if let Some(target) = &self.target {
                         let compatible = !is_esi_icon(&target.name) || self.mode == ConversionMode::EsiHex;
                         if !compatible {
-                            ui.colored_label(Theme::WARNING, "ImageData16x14 requires ESI icon (hex) output.");
+                            ui.colored_label(pal.warning, loc.msg("icon-requires-esi"));
                         }
                         if has_text_draft {
-                            ui.colored_label(Theme::WARNING, "This replaces your unapplied text draft. Name and attribute drafts are kept.");
+                            ui.colored_label(pal.warning, loc.msg("icon-replace-draft"));
                         }
-                        ui.label(format!("Target: <{}> (node {})", target.name, target.node_id));
-                        if ui.add_enabled(compatible, egui::Button::new("Fill Text Draft")).clicked() {
+                        ui.label(loc.msg_with("icon-target", Some(&crate::fluent_args!("name" => target.name.as_str()))));
+                        if ui.add_enabled(compatible, egui::Button::new(loc.msg("icon-fill"))).clicked() {
                             import = Some(IconImport { target: target.clone(), mode: self.mode, text: ready.text.clone() });
                         }
-                        ui.label(RichText::new("Review in Details, then use Apply Changes or Reset.").small());
+                        ui.label(RichText::new(loc.msg("icon-review")).small());
                     } else {
-                        ui.label("To import, select a leaf element and open Import Icon in Details.");
+                        ui.label(loc.msg("icon-no-target"));
                     }
                 }
-                if let Some(status) = &self.status { ui.label(RichText::new(status).color(Theme::INFO)); }
+                if let Some(status) = &self.status { ui.label(RichText::new(loc.msg_with(status, Some(&crate::fluent_args!("path" => self.saved_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default())))).color(pal.info)); }
             });
 
+        if save_requested {
+            self.pick_file(true, ctx, loc);
+        }
         if !open || import.is_some() {
             self.close();
         } else if let Some(response) = response {
@@ -349,7 +408,7 @@ impl IconConverter {
                     // Some desktop backends omit pointer coordinates during an OS drop.
                     .is_none_or(|p| response.response.rect.contains(p))
             });
-            if inside && !self.file_dialog.is_pending() && self.worker.is_none() {
+            if inside && self.dialog_job.is_none() && self.worker.is_none() {
                 let dropped = ctx.input(|i| i.raw.dropped_files.clone());
                 if !dropped.is_empty() {
                     self.accept_drop(dropped, ctx);
@@ -363,7 +422,7 @@ impl IconConverter {
         if files.len() != 1 {
             self.ready = None;
             self.source = None;
-            self.error = Some("Drop one image at a time.".into());
+            self.error = Some("icon-drop-one".into());
             return;
         }
         let file = files.pop().expect("one file");
@@ -380,15 +439,35 @@ impl IconConverter {
         } else {
             self.ready = None;
             self.source = None;
-            self.error = Some("The dropped item has no readable image data.".into());
+            self.error = Some("icon-drop-invalid".into());
+        }
+    }
+}
+
+fn conversion_note(note: &ConversionNote, loc: &Localization) -> String {
+    match note {
+        ConversionNote::Original => loc.msg("icon-already-compliant"),
+        ConversionNote::Converted {
+            format,
+            width,
+            height,
+            depth,
+            single_frame,
+        } => {
+            let mut text = loc.msg_with("icon-converted", Some(&crate::fluent_args!("format" => format.label(), "width" => *width, "height" => *height, "depth" => depth.map(|d| format!(", {d}bpp")).unwrap_or_default())));
+            if *single_frame {
+                text.push(' ');
+                text.push_str(&loc.msg("icon-single-frame"));
+            }
+            text
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::image_conversion::esi_test_bmp;
     use super::*;
+    use crate::services::image_conversion::esi_test_bmp;
 
     fn source() -> IconSource {
         IconSource {
@@ -399,8 +478,11 @@ mod tests {
 
     fn target() -> IconTarget {
         IconTarget {
-            root_id: 1,
-            node_id: 2,
+            session: SessionId(1),
+            revision: Revision(1),
+            selection: crate::core::NodeId(2),
+            element: crate::core::NodeId(2),
+            content: None,
             name: "ImageData16x14".into(),
         }
     }
@@ -436,21 +518,19 @@ mod tests {
         let mut converter = IconConverter::default();
         converter.open(Some(target()), &ctx);
         converter.dialog_generation = converter.generation;
-        let (tx, rx) = mpsc::channel();
-        converter.worker = Some(rx);
-        tx.send(ConversionReply {
-            source: Some(source()),
-            result: convert_icon(&source(), ConversionMode::EsiHex, 1024),
-        })
-        .ok()
-        .unwrap();
+        converter.start_conversion(IconInput::Loaded(source()), &ctx);
         converter.close();
         converter.open(None, &ctx);
         converter.handle_dialog_result(FileDialogResult::OpenImage(Some("stale.bmp".into())), &ctx);
         converter.poll(&ctx);
-        assert!(converter.source.is_none());
-        assert!(converter.ready.is_none());
-        assert!(converter.worker.is_none());
+        wait_for_workers(&mut converter, &ctx);
+        assert_eq!(converter.mode, ConversionMode::Base64);
+        assert!(
+            converter
+                .ready
+                .as_ref()
+                .is_some_and(|r| !r.text.starts_with("424D"))
+        );
         assert!(converter.error.is_none());
     }
 
@@ -474,7 +554,7 @@ mod tests {
         assert_eq!(converter.ready.as_ref().unwrap().text, expected);
         converter.accept_drop(vec![file.clone(), file], &ctx);
         assert!(converter.ready.is_none());
-        assert!(converter.error.as_ref().unwrap().contains("one image"));
+        assert!(converter.error.as_ref().unwrap().contains("icon-drop-one"));
     }
 
     #[test]
@@ -534,7 +614,11 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| {
-            converter.show(ctx, false);
+            converter.show(
+                ctx,
+                false,
+                &Localization::with_language(super::super::localization::Language::English),
+            );
         });
         wait_for_workers(&mut converter, &ctx);
         assert!(converter.ready.is_some());
@@ -555,11 +639,19 @@ mod tests {
         let expected = converter.ready.as_ref().unwrap().text.clone();
         for _ in 0..3 {
             let _ = ctx.run(input(), |ctx| {
-                converter.show(ctx, false);
+                converter.show(
+                    ctx,
+                    false,
+                    &Localization::with_language(super::super::localization::Language::English),
+                );
             });
         }
         let output = ctx.run(input(), |ctx| {
-            converter.show(ctx, false);
+            converter.show(
+                ctx,
+                false,
+                &Localization::with_language(super::super::localization::Language::English),
+            );
         });
         let (rect, clip) = output
             .shapes
@@ -590,7 +682,11 @@ mod tests {
                 },
             ];
             let output = ctx.run(input, |ctx| {
-                converter.show(ctx, false);
+                converter.show(
+                    ctx,
+                    false,
+                    &Localization::with_language(super::super::localization::Language::English),
+                );
             });
             if !pressed {
                 assert!(output.platform_output.commands.iter().any(|command| {

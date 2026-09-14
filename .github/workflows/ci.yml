@@ -2,22 +2,33 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [master, main]
   pull_request:
+  schedule:
+    # Nightly fuzz window: 03:20 UTC.
+    - cron: "20 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    name: build-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: windows-2025
+          - os: macos-15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -52,7 +63,57 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --quiet
+        run: cargo test --quiet --all-targets
 
-      - name: Benchmark build smoke test
+      - name: Release build
+        run: cargo build --release --quiet
+
+      - name: Benchmark smoke + JSON results
+        if: runner.os == 'Linux'
         run: cargo bench --no-run --quiet
+
+      - name: Upload benchmark binaries metadata
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-binaries
+          path: target/release/deps/xml_benchmark-*
+          if-no-files-found: ignore
+
+  security:
+    name: audit-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
+  fuzz:
+    name: nightly-fuzz
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Corpus regression (30-minute budget)
+        run: |
+          # The in-tree robustness suite (tests/property_fuzz_tests.rs)
+          # covers XML bytes, EXI streams, XPath, schemas, and base64
+          # entry points; the nightly job additionally drives cargo-fuzz
+          # when fuzz targets are present.
+          if [ -d fuzz ]; then
+            cargo fuzz run fuzz_xml -- -max_total_time=1800
+          else
+            cargo test --release --test property_fuzz_tests -- --nocapture
+          fi
