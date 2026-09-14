@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// Result delivered from the background file-dialog thread.
 pub enum FileDialogResult {
@@ -8,6 +8,8 @@ pub enum FileDialogResult {
     SaveXml(Option<PathBuf>),
     SaveExi(Option<PathBuf>),
     SaveJson(Option<PathBuf>),
+    OpenImage(Option<PathBuf>),
+    SaveIconText(Option<PathBuf>),
 }
 
 /// Which file-dialog action to open.
@@ -18,6 +20,8 @@ pub enum FileDialogAction {
     SaveXml,
     SaveExi,
     SaveJson,
+    OpenImage,
+    SaveIconText,
 }
 
 /// Manages async file dialogs.
@@ -43,11 +47,17 @@ impl FileDialogManager {
 
     /// Poll for a completed dialog result.
     pub fn poll(&mut self) -> Option<FileDialogResult> {
-        let result = self.rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if result.is_some() {
-            self.rx = None;
+        match self.rx.as_ref()?.try_recv() {
+            Ok(result) => {
+                self.rx = None;
+                Some(result)
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.rx = None;
+                None
+            }
+            Err(TryRecvError::Empty) => None,
         }
-        result
     }
 
     /// Open a file dialog of the specified type.
@@ -61,6 +71,21 @@ impl FileDialogManager {
 
         std::thread::spawn(move || {
             let result = match action {
+                FileDialogAction::OpenImage => FileDialogResult::OpenImage(
+                    rfd::FileDialog::new()
+                        .add_filter(
+                            "Images",
+                            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"],
+                        )
+                        .add_filter("All Files", &["*"])
+                        .pick_file(),
+                ),
+                FileDialogAction::SaveIconText => FileDialogResult::SaveIconText(
+                    rfd::FileDialog::new()
+                        .add_filter("Encoded Text", &["txt"])
+                        .set_file_name("icon.txt")
+                        .save_file(),
+                ),
                 FileDialogAction::OpenXml => FileDialogResult::OpenXml(
                     rfd::FileDialog::new()
                         .add_filter("XML Files", &["xml"])

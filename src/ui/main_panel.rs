@@ -10,6 +10,8 @@ use crate::xml::{XmlDocument, parse_xml_file, serialize_xml};
 
 use super::base64_image::EncodedImagePreview;
 use super::file_dialog::{FileDialogAction, FileDialogManager, FileDialogResult};
+use super::icon_converter::{IconConverter, IconImport, IconTarget};
+use super::image_conversion::{ConversionMode, is_esi_icon};
 use super::search_bar::SearchBar;
 use super::shortcuts_panel::ShortcutsPanel;
 use super::status_bar::{StatusBarData, show_status_bar};
@@ -108,6 +110,7 @@ pub struct MainPanel {
     syntax_highlighter: SyntaxHighlighter,
     detail_editor: DetailEditorState,
     encoded_image_preview: EncodedImagePreview,
+    icon_converter: IconConverter,
     history: DocumentHistory,
     pending_delete_confirmation: Option<u64>,
     pending_unsaved_action: Option<PendingUnsavedAction>,
@@ -222,6 +225,7 @@ impl MainPanel {
             syntax_highlighter: SyntaxHighlighter::new(),
             detail_editor: DetailEditorState::default(),
             encoded_image_preview: EncodedImagePreview::default(),
+            icon_converter: IconConverter::default(),
             history: DocumentHistory::default(),
             pending_delete_confirmation: None,
             pending_unsaved_action: None,
@@ -248,6 +252,14 @@ impl MainPanel {
         self.show_menu_bar(ctx);
         show_status_bar(ctx, &self.status_data);
         self.show_body(ctx);
+        let target = self.current_icon_target();
+        self.icon_converter.sync_target(target.as_ref());
+        let has_text_draft = self.xml_tree_view.get_selected_info().is_some_and(|info| {
+            info.text.as_deref().unwrap_or("") != self.detail_editor.text_content
+        });
+        if let Some(import) = self.icon_converter.show(ctx, has_text_draft) {
+            self.fill_icon_draft(import);
+        }
         self.show_unsaved_changes_dialog(ctx);
 
         // Show shortcuts panel if visible
@@ -614,6 +626,11 @@ impl MainPanel {
                     });
 
                     ui.menu_button("Tools", |ui| {
+                        if ui.button("Icon Converter…").clicked() {
+                            self.icon_converter.open(self.current_icon_target(), ctx);
+                            ui.close();
+                        }
+                        ui.separator();
                         ui.add_enabled_ui(self.current_document.is_some(), |ui| {
                             if ui.button("🗜 Compress to EXI").clicked() {
                                 self.compress_to_exi();
@@ -960,7 +977,12 @@ impl MainPanel {
                         ui.add_space(10.0);
                     }
 
-                    ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Text Content").strong().color(Theme::INFO));
+                        if info.child_count == 0 && ui.button("Import Icon…").clicked() {
+                            self.icon_converter.open(self.current_icon_target(), ui.ctx());
+                        }
+                    });
                     ui.add_space(5.0);
                     if info.child_count == 0 {
                         let response = ui.add(
@@ -1484,6 +1506,43 @@ impl MainPanel {
         });
     }
 
+    fn current_icon_target(&self) -> Option<IconTarget> {
+        let doc = self.current_document.as_ref()?;
+        let id = self.xml_tree_view.selected_id()?;
+        let element = doc.find_element(id)?;
+        if !element.children.is_empty() {
+            return None;
+        }
+        Some(IconTarget {
+            root_id: doc.root.as_element()?.id.0,
+            node_id: id,
+            name: if self.detail_editor.selected_id == Some(id) {
+                self.detail_editor.element_name.clone()
+            } else {
+                element.name.clone()
+            },
+        })
+    }
+
+    fn fill_icon_draft(&mut self, import: IconImport) {
+        if self.current_icon_target().as_ref() != Some(&import.target) {
+            self.set_status("Icon import cancelled: the target element changed.");
+            return;
+        }
+        if is_esi_icon(&import.target.name) && import.mode != ConversionMode::EsiHex {
+            self.set_status("ImageData16x14 requires ESI icon (hex) output.");
+            return;
+        }
+        // The converter produces a draft only. Applying it uses the same
+        // document/history/cache path as a manual text edit.
+        self.detail_editor
+            .sync_with_selection(self.xml_tree_view.get_selected_info());
+        self.detail_editor.text_content = import.text.to_string();
+        self.detail_editor.mark_text_changed();
+        self.show_raw_xml = false;
+        self.set_status("Icon filled into the text draft. Review it, then Apply Changes or Reset.");
+    }
+
     fn apply_selected_element_edits(&mut self) {
         self.clear_delete_confirmation();
         let Some(selected_id) = self.xml_tree_view.selected_id() else {
@@ -1980,5 +2039,117 @@ mod tests {
         assert!(!panel.has_unsaved_changes());
         assert_eq!(panel.current_file_path.as_ref(), Some(&path));
         assert_eq!(panel.current_file_type, FileType::Xml);
+    }
+
+    fn icon_import(panel: &MainPanel, mode: ConversionMode) -> IconImport {
+        let source = super::super::image_conversion::IconSource {
+            name: "icon.bmp".into(),
+            bytes: super::super::image_conversion::esi_test_bmp().into(),
+        };
+        let converted = super::super::image_conversion::convert_icon(&source, mode, 1024).unwrap();
+        IconImport {
+            target: panel.current_icon_target().unwrap(),
+            mode,
+            text: converted.text,
+        }
+    }
+
+    #[test]
+    fn icon_draft_preserves_other_edits_and_supports_reset() {
+        let mut panel = panel_with_document(r#"<root><icon attr="old">old text</icon></root>"#);
+        panel.select_document_node(Some(child_id(&panel)));
+        panel.detail_editor.element_name = "renamed".into();
+        panel.detail_editor.attribute_values[0] = "new".into();
+        let revision = panel.detail_editor.text_revision;
+        let import = icon_import(&panel, ConversionMode::Base64);
+        panel.fill_icon_draft(import);
+        assert_eq!(panel.detail_editor.element_name, "renamed");
+        assert_eq!(panel.detail_editor.attribute_values, ["new"]);
+        assert!(panel.detail_editor.text_revision > revision);
+        assert!(!panel.history.can_undo());
+        assert!(!panel.has_unsaved_changes());
+        assert_eq!(
+            panel
+                .current_document
+                .as_ref()
+                .unwrap()
+                .find_element(child_id(&panel))
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("old text")
+        );
+        let selected = panel.xml_tree_view.get_selected_info().unwrap().clone();
+        panel.detail_editor.load_from_info(&selected);
+        assert_eq!(panel.detail_editor.text_content, "old text");
+        assert!(!panel.detail_editor.has_changes(&selected));
+    }
+
+    #[test]
+    fn icon_apply_undo_redo_and_save_use_existing_document_lifecycle() {
+        let mut panel = panel_with_document("<root><ImageData16x14>old</ImageData16x14></root>");
+        panel.select_document_node(Some(child_id(&panel)));
+        panel.exi_data = Some(vec![1, 2, 3]);
+        panel.pending_json_export = Some("stale JSON".into());
+        let import = icon_import(&panel, ConversionMode::EsiHex);
+        let expected = import.text.to_string();
+        panel.fill_icon_draft(import);
+        panel.apply_selected_element_edits();
+        assert!(panel.has_unsaved_changes());
+        assert!(panel.exi_data.is_none());
+        assert!(panel.pending_json_export.is_none());
+        panel.undo_last_change();
+        assert_eq!(panel.detail_editor.text_content, "old");
+        assert!(!panel.has_unsaved_changes());
+        assert_eq!(panel.exi_data, Some(vec![1, 2, 3]));
+        panel.redo_last_change();
+        assert_eq!(panel.detail_editor.text_content, expected);
+        assert!(panel.exi_data.is_none());
+        let file = NamedTempFile::new().unwrap();
+        assert!(panel.save_xml(&file.path().to_path_buf()));
+        panel.load_xml(&file.path().to_path_buf());
+        panel.select_document_node(Some(child_id(&panel)));
+        assert_eq!(panel.detail_editor.text_content, expected);
+        assert!(!panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn icon_import_rejects_stale_targets_and_base64_for_esi() {
+        let mut panel =
+            panel_with_document("<root><ImageData16x14>old</ImageData16x14><other/></root>");
+        panel.select_document_node(Some(child_id(&panel)));
+        let invalid_mode = icon_import(&panel, ConversionMode::Base64);
+        panel.fill_icon_draft(invalid_mode);
+        assert_eq!(panel.detail_editor.text_content, "old");
+        let stale = icon_import(&panel, ConversionMode::EsiHex);
+        let root_id = panel
+            .current_document
+            .as_ref()
+            .unwrap()
+            .root
+            .as_element()
+            .unwrap()
+            .id
+            .0;
+        panel.select_document_node(Some(root_id));
+        assert!(panel.current_icon_target().is_none());
+        panel.fill_icon_draft(stale);
+        assert!(panel.detail_editor.text_content.is_empty());
+        assert!(!panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn icon_import_cannot_cross_document_or_draft_name_changes() {
+        let mut panel = panel_with_document("<root><icon/></root>");
+        panel.select_document_node(Some(child_id(&panel)));
+        let import = icon_import(&panel, ConversionMode::Base64);
+        panel.detail_editor.element_name = "ImageData16x14".into();
+        panel.fill_icon_draft(import);
+        assert!(panel.detail_editor.text_content.is_empty());
+        let import = icon_import(&panel, ConversionMode::EsiHex);
+        panel.current_document = Some(parse_xml("<root><icon/></root>").unwrap());
+        panel.select_document_node(Some(child_id(&panel)));
+        panel.fill_icon_draft(import);
+        assert!(panel.detail_editor.text_content.is_empty());
     }
 }

@@ -23,7 +23,7 @@ egui_extras = { version = "0.33.3", features = ["image"] }
 
 # Base64 image previews
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 
 # File dialog
 rfd = "0.15"
