@@ -44,7 +44,15 @@ pub fn inspector_contents(ui: &mut Ui, shell: &mut AppShell) {
         );
         return;
     };
-    inspector_body(ui, shell, node);
+    let session_id = session.id;
+    egui::ScrollArea::vertical()
+        .id_salt("inspector-scroll")
+        .show(ui, |ui| {
+            ui.push_id(("inspector-session", session_id.0), |ui| {
+                inspector_body(ui, shell, node);
+                shell.show_icon_inspector(ui);
+            });
+        });
 }
 
 fn inspector_body(ui: &mut Ui, shell: &mut AppShell, node: NodeId) {
@@ -270,23 +278,31 @@ fn inspector_text_edit(
     multiline: bool,
 ) -> Option<String> {
     let id = ui.id().with(("inspector-edit", field, node.0));
-    let mut value = ui
-        .data_mut(|data| data.get_temp::<String>(id))
-        .unwrap_or_else(|| current.to_owned());
+    let (base, mut value) = ui
+        .data_mut(|data| data.get_temp::<(String, String)>(id))
+        .unwrap_or_else(|| (current.to_owned(), current.to_owned()));
+    if base != current {
+        value = current.to_owned();
+    }
     let response = if multiline {
         ui.add(
             TextEdit::multiline(&mut value)
+                .id(id)
                 .desired_rows(4)
                 .desired_width(f32::INFINITY),
         )
     } else {
-        ui.add(TextEdit::singleline(&mut value).desired_width(f32::INFINITY))
+        ui.add(
+            TextEdit::singleline(&mut value)
+                .id(id)
+                .desired_width(f32::INFINITY),
+        )
     };
     if response.lost_focus() && value != current {
-        ui.data_mut(|data| data.remove::<String>(id));
+        ui.data_mut(|data| data.remove::<(String, String)>(id));
         return Some(value);
     }
-    ui.data_mut(|data| data.insert_temp(id, value));
+    ui.data_mut(|data| data.insert_temp(id, (current.to_owned(), value)));
     None
 }
 

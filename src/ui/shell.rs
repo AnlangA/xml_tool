@@ -123,6 +123,9 @@ pub struct AppShell {
     prefs_applied: Option<(ThemeMode, FontScale, egui::Theme)>,
     /// Fonts are installed once per context, not per frame.
     fonts_installed: bool,
+    pub(crate) icon_converter: super::icon_converter::IconConverter,
+    pub(crate) icon_draft: Option<super::icon_import::IconDraft>,
+    pub(crate) image_preview: super::base64_image::EncodedImagePreview,
     /// Narrow-layout drawers (outline closed by default on narrow windows).
     pub show_outline_drawer: bool,
     pub show_inspector_drawer: bool,
@@ -140,12 +143,16 @@ pub struct AppShell {
 impl AppShell {
     /// Builds the shell with system-detected language and theme.
     pub fn new() -> AppShell {
+        let tasks = Arc::new(TaskManager::new());
         AppShell {
             localization: Localization::new(),
             theme_mode: ThemeMode::System,
             font_scale: FontScale::default(),
             workspace: WorkspaceState::new(),
-            tasks: Arc::new(TaskManager::new()),
+            icon_converter: super::icon_converter::IconConverter::with_tasks(Arc::clone(&tasks)),
+            image_preview: super::base64_image::EncodedImagePreview::with_tasks(Arc::clone(&tasks)),
+            icon_draft: None,
+            tasks,
             watcher: FileWatcher::new().ok(),
             recovery: RecoveryStore::new(RecoveryStore::default_root()),
             expanded: HashMap::new(),
@@ -315,6 +322,7 @@ impl AppShell {
         // switches back to the owning tab).
         self.alerts.session = self.workspace.active_id();
         self.handle_shortcuts(ctx);
+        self.sync_icon_target();
 
         if self.alerts.panel_requested {
             self.alerts.panel_requested = false;
@@ -335,6 +343,7 @@ impl AppShell {
         panels::status_bar(ctx, self);
         self.frames.record("status-bar", started.elapsed());
         crate::ui::dialogs::dialogs(ctx, self);
+        self.show_icon_converter(ctx);
     }
 
     fn apply_preferences_once(&mut self, ctx: &Context) {

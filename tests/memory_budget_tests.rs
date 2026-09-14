@@ -13,6 +13,7 @@ use xml_tool::fixtures;
 use xml_tool::services::outline::FlatTree;
 use xml_tool::services::search::SearchIndex;
 
+#[cfg(target_os = "linux")]
 fn rss_kib() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
     for line in status.lines() {
@@ -25,6 +26,40 @@ fn rss_kib() -> u64 {
         }
     }
     u64::MAX
+}
+
+#[cfg(windows)]
+fn rss_kib() -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // The API fills the initialized counter struct for this process only.
+    unsafe {
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        counters.cb = size;
+        assert_ne!(
+            GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size),
+            0,
+            "process memory counters"
+        );
+        counters.WorkingSetSize as u64 / 1024
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn rss_kib() -> u64 {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("read resident memory with ps");
+    assert!(output.status.success(), "ps failed to read RSS");
+    String::from_utf8(output.stdout)
+        .expect("RSS output")
+        .trim()
+        .parse()
+        .expect("RSS in KiB")
 }
 
 /// Serializes the two RSS measurements inside this binary.

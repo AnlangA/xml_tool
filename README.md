@@ -58,6 +58,34 @@ Every feature below has automated coverage (test file in parentheses).
   scaling, bundled Noto Sans SC, 12 UI snapshot combinations
   (`tests/ui_shell_tests.rs`).
 
+### Convert and import icons
+
+Open **XML → Icon Converter** to convert PNG, JPEG, GIF, WebP, BMP, or ICO files,
+even without an open document. Choose a file or drag one into the converter,
+preview the result, then copy or save the full encoded text. Base64 and Data URI
+preserve the original file bytes, including animation frames and ICO entries.
+
+For XML import, select an existing simple leaf element or its single text/CDATA
+child, then choose **Import Icon** in the Inspector. **Fill Text Draft** stages
+the result for preview; **Apply Changes** commits it as one independent undo
+step, while **Reset** discards the draft. Attributes, namespaces, CDATA, comments
+outside the target, and surrounding source formatting are preserved. Import is
+disabled for mixed content, read-only documents, or an unapplied source draft.
+Changing tabs, selection, or document revision invalidates the import target.
+
+`ImageData16x14` selects ESI mode automatically. It produces a 16×14, 4bpp BMP
+with at most 16 colors, fitted and centered with transparent padding, then
+encodes those bytes as uppercase hexadecimal. Magenta (`#FF00FF`) and alpha
+below 50% become transparent. The preview shows the final bitmap. Already
+compliant BMP files retain their bytes; animations/ICO use the default frame/icon
+for ESI conversion. No XML nodes are created automatically except the text child
+needed inside a selected empty element.
+
+Files are limited to 8 MiB, 4096 pixels per side, 8,388,608 pixels total, and
+64 MiB decoder allocation. Conversion and preview decoding use background jobs;
+text exports use atomic saves. The window follows the active language and theme
+and uses the bundled CJK font. SVG, clipboard images, and batch input are excluded.
+
 ### Keyboard map
 
 | Shortcut | Action |

@@ -11,6 +11,8 @@ pub mod diff;
 pub mod document_io;
 pub mod exi_workbench;
 pub mod frame_observer;
+pub(crate) mod image_conversion;
+pub(crate) mod image_import;
 pub mod large_file;
 pub mod outline;
 pub mod recovery;

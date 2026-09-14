@@ -24,7 +24,7 @@ egui = "0.33.3"
 
 # Base64 image previews
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 
 # File dialog
 rfd = "0.15"
@@ -65,6 +65,9 @@ sha2 = "0.10"
 criterion = "0.5"
 tempfile = "3.27"
 egui_kittest = { version = "0.33.3", features = ["snapshot", "wgpu"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3

@@ -280,6 +280,16 @@ impl XmlDocument {
             .collect()
     }
 
+    /// Bounded inspection for leaf-only tools; avoid walking a large branch
+    /// merely to establish that it has more than one child.
+    pub(crate) fn first_children(&self, node: NodeId, limit: usize) -> Vec<NodeId> {
+        self.dom()
+            .children_iter(node.to_engine())
+            .take(limit)
+            .map(NodeId::from_engine)
+            .collect()
+    }
+
     /// Attribute list of an element: `(rendered name, value)` pairs.
     pub fn attributes(&self, element: NodeId) -> Vec<(String, String)> {
         self.dom()

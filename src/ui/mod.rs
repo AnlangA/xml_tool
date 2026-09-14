@@ -1,12 +1,11 @@
 //! Desktop UI: the shell, its panels, and reusable widgets.
 
 pub mod alerts;
-// base64_image keeps its own unit tests and is re-wired by a later plan
-// step (image decoding); its non-test helpers are unused until then.
-#[allow(dead_code)]
 pub mod base64_image;
 pub mod dialogs;
 pub mod fonts;
+pub(crate) mod icon_converter;
+mod icon_import;
 pub mod icons;
 pub mod inspector;
 pub mod localization;

@@ -54,7 +54,7 @@ fn stale_task_results_never_override_newer_revision() {
 }
 
 #[test]
-fn results_belonging_to_other_sessions_are_dropped() {
+fn results_belonging_to_other_sessions_are_retained_for_their_poller() {
     let manager = TaskManager::new();
     manager.spawn(SessionId(1), Revision(1), |_| {
         Box::new(String::from("session-1"))
@@ -64,6 +64,10 @@ fn results_belonging_to_other_sessions_are_dropped() {
             .wait_for_outcome(SessionId(2), Revision(1))
             .is_none()
     );
+    let result = manager
+        .wait_for_outcome(SessionId(1), Revision(1))
+        .expect("own session receives result");
+    assert_eq!(*result.result.downcast::<String>().unwrap(), "session-1");
 }
 
 #[test]

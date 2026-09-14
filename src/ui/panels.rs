@@ -217,6 +217,11 @@ fn menu_bar(ui: &mut Ui, shell: &mut AppShell) {
             }
         });
         ui.menu_button(shell.localization.msg("menu-xml"), |ui| {
+            if ui.button(shell.localization.msg("icon-title")).clicked() {
+                shell.open_icon_converter(ui.ctx());
+                ui.close();
+            }
+            ui.separator();
             if ui.button(shell.localization.msg("action-format")).clicked() {
                 shell.commit(Command::FormatDocument {
                     indent: "  ".to_string(),

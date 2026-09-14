@@ -1,24 +1,25 @@
-use std::io::Cursor;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use egui::{ColorImage, RichText, TextureHandle, TextureOptions};
-use image::imageops::FilterType;
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use crate::utils::format_size;
 
-use super::theme::Theme;
+use super::localization::Localization;
+use super::theme::Palette;
+use crate::core::Revision;
+#[cfg(test)]
+use crate::services::image_conversion::MAX_PREVIEW_TEXTURE_SIDE;
+use crate::services::image_conversion::{
+    ImageFileFormat as PreviewImageFormat, MAX_DECODED_BYTES, decode_image_bytes, is_esi_icon,
+};
+use crate::services::task_manager::{JobId, SessionId, TaskManager};
+use std::sync::Arc;
+const PREVIEW_SESSION: SessionId = SessionId(u64::MAX - 7);
 
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ENCODED_CHARS: usize = MAX_DECODED_BYTES.div_ceil(3) * 4;
-const MAX_IMAGE_DIMENSION: u32 = 4_096;
-const MAX_IMAGE_PIXELS: u64 = 8 * 1024 * 1024;
-const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 const MIN_PLAIN_BASE64_CHARS: usize = 32;
 const MAX_DATA_URI_METADATA_BYTES: usize = 1_024;
-const MAX_PREVIEW_TEXTURE_SIDE: u32 = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceEncoding {
@@ -31,49 +32,6 @@ impl SourceEncoding {
         match self {
             Self::Base64 => "Base64",
             Self::Hexadecimal => "hex",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviewImageFormat {
-    Png,
-    Jpeg,
-    Gif,
-    WebP,
-    Bmp,
-}
-
-impl PreviewImageFormat {
-    fn from_image_format(format: ImageFormat) -> Option<Self> {
-        match format {
-            ImageFormat::Png => Some(Self::Png),
-            ImageFormat::Jpeg => Some(Self::Jpeg),
-            ImageFormat::Gif => Some(Self::Gif),
-            ImageFormat::WebP => Some(Self::WebP),
-            ImageFormat::Bmp => Some(Self::Bmp),
-            _ => None,
-        }
-    }
-
-    fn from_mime_type(mime_type: &str) -> Option<Self> {
-        match mime_type {
-            "image/png" | "image/x-png" => Some(Self::Png),
-            "image/jpeg" | "image/jpg" => Some(Self::Jpeg),
-            "image/gif" => Some(Self::Gif),
-            "image/webp" => Some(Self::WebP),
-            "image/bmp" | "image/x-bmp" | "image/x-ms-bmp" => Some(Self::Bmp),
-            _ => None,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Png => "PNG",
-            Self::Jpeg => "JPEG",
-            Self::Gif => "GIF",
-            Self::WebP => "WebP",
-            Self::Bmp => "BMP",
         }
     }
 }
@@ -98,6 +56,7 @@ enum Detection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewKey {
+    session: u64,
     node_id: u64,
     text_revision: u64,
 }
@@ -116,6 +75,7 @@ struct RenderedPreview {
 enum PreviewState {
     #[default]
     Hidden,
+    Loading,
     Ready(RenderedPreview),
     Error(String),
 }
@@ -125,45 +85,68 @@ enum PreviewState {
 /// Decoding happens only when the selection or text revision changes, rather than
 /// on every egui frame.
 #[derive(Default)]
-pub(super) struct EncodedImagePreview {
+pub(crate) struct EncodedImagePreview {
+    tasks: Arc<TaskManager>,
+    worker: Option<JobId>,
     key: Option<PreviewKey>,
     state: PreviewState,
 }
 
 impl EncodedImagePreview {
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn with_tasks(tasks: Arc<TaskManager>) -> Self {
+        Self {
+            tasks,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        if let Some(job) = self.worker.take() {
+            self.tasks.cancel(job);
+        }
         self.key = None;
         self.state = PreviewState::Hidden;
     }
 
-    pub(super) fn show(
+    pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
-        node_id: u64,
-        text_revision: u64,
+        identity: (u64, u64, u64),
         element_name: &str,
         source: &str,
         previewing_unapplied_text: bool,
+        loc: &Localization,
     ) {
+        let pal = Palette::resolve(ui.ctx());
         let key = PreviewKey {
-            node_id,
-            text_revision,
+            session: identity.0,
+            node_id: identity.1,
+            text_revision: identity.2,
         };
         if self.key != Some(key) {
             self.rebuild(ui.ctx(), key, element_name, source);
         }
 
+        self.poll(ui.ctx());
         match &self.state {
             PreviewState::Hidden => {}
+            PreviewState::Loading => {
+                ui.spinner();
+                ui.label(loc.msg("icon-preview-loading"));
+            }
             PreviewState::Ready(preview) => {
                 ui.add_space(10.0);
                 egui::Frame::new()
-                    .fill(Theme::CARD_BG)
+                    .fill(pal.card_bg)
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("Image Preview").strong().color(Theme::INFO));
+                            ui.label(
+                                RichText::new(loc.msg("icon-preview"))
+                                    .strong()
+                                    .color(pal.info),
+                            );
                             ui.separator();
                             ui.label(
                                 RichText::new(format!(
@@ -175,21 +158,21 @@ impl EncodedImagePreview {
                                     format_size(preview.encoded_bytes),
                                 ))
                                 .small()
-                                .color(Theme::TEXT_MUTED),
+                                .color(pal.text_muted),
                             );
                         });
 
                         if previewing_unapplied_text {
                             ui.label(
-                                RichText::new("Previewing unapplied text")
+                                RichText::new(loc.msg("icon-preview-draft"))
                                     .small()
                                     .italics()
-                                    .color(Theme::WARNING),
+                                    .color(pal.warning),
                             );
                         }
 
                         if let Some(warning) = &preview.warning {
-                            ui.label(RichText::new(warning).small().color(Theme::WARNING));
+                            ui.label(RichText::new(warning).small().color(pal.warning));
                         }
 
                         ui.add_space(8.0);
@@ -203,8 +186,8 @@ impl EncodedImagePreview {
                             ui.add(
                                 egui::Image::from_texture(&preview.texture)
                                     .fit_to_exact_size(display_size)
-                                    .bg_fill(Theme::SURFACE1)
-                                    .alt_text("Encoded image preview"),
+                                    .bg_fill(pal.input_bg)
+                                    .alt_text(loc.msg("icon-preview")),
                             );
                         });
                     });
@@ -212,57 +195,95 @@ impl EncodedImagePreview {
             PreviewState::Error(message) => {
                 ui.add_space(10.0);
                 egui::Frame::new()
-                    .fill(Theme::ERROR_BG)
+                    .fill(pal.error_bg)
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
-                        ui.label(RichText::new("Image Preview").strong().color(Theme::ERROR));
-                        ui.label(RichText::new(message).small().color(Theme::TEXT_SECONDARY));
+                        ui.label(
+                            RichText::new(loc.msg("icon-preview"))
+                                .strong()
+                                .color(pal.error),
+                        );
+                        ui.label(RichText::new(message).small().color(pal.text_secondary));
                     });
             }
         }
     }
 
     fn rebuild(&mut self, ctx: &egui::Context, key: PreviewKey, element_name: &str, source: &str) {
+        if let Some(job) = self.worker.take() {
+            self.tasks.cancel(job);
+        }
         self.key = Some(key);
-        let runtime_texture_side = ctx.input(|input| input.max_texture_side);
-        let runtime_texture_side = u32::try_from(runtime_texture_side).unwrap_or(u32::MAX);
-        let use_ethercat_transparency = element_name
-            .rsplit(':')
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case("ImageData16x14"));
-        self.state = match detect_encoded_image_for_texture(
-            source,
-            runtime_texture_side,
-            use_ethercat_transparency,
-        ) {
-            Detection::NotImage => PreviewState::Hidden,
-            Detection::Error(message) => PreviewState::Error(message),
-            Detection::Ready(decoded) => {
-                let texture_options = if decoded.width <= 64 && decoded.height <= 64 {
-                    TextureOptions::NEAREST
-                } else {
-                    TextureOptions::LINEAR
-                };
-                let texture = ctx.load_texture(
-                    format!(
-                        "encoded-image-preview-{}-{}",
-                        key.node_id, key.text_revision
-                    ),
-                    decoded.image,
-                    texture_options,
-                );
-                PreviewState::Ready(RenderedPreview {
-                    texture,
-                    format: decoded.format,
-                    encoding: decoded.encoding,
-                    width: decoded.width,
-                    height: decoded.height,
-                    encoded_bytes: decoded.encoded_bytes,
-                    warning: decoded.warning,
+        if source.len() > MAX_SOURCE_BYTES {
+            self.state = PreviewState::Error(format!(
+                "Encoded image text is limited to {}.",
+                format_size(MAX_SOURCE_BYTES)
+            ));
+            return;
+        }
+        self.state = PreviewState::Loading;
+        let side = ctx.input(|input| u32::try_from(input.max_texture_side).unwrap_or(u32::MAX));
+        let use_ethercat_transparency = is_esi_icon(element_name);
+        let source = source.to_owned();
+        let ctx = ctx.clone();
+        self.worker = Some(
+            self.tasks
+                .spawn(PREVIEW_SESSION, Revision(0), move |_| {
+                    let result =
+                        detect_encoded_image_for_texture(&source, side, use_ethercat_transparency);
+                    ctx.request_repaint();
+                    Box::new(result)
                 })
+                .0,
+        );
+    }
+
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+        while let Ok(Some(outcome)) = self.tasks.take_outcome(PREVIEW_SESSION, Revision(0)) {
+            if self.worker != Some(outcome.job) {
+                continue;
             }
-        };
+            self.worker = None;
+            let Some(key) = self.key else {
+                continue;
+            };
+            let result = *outcome
+                .result
+                .downcast::<Detection>()
+                .expect("image preview job");
+            self.state = match result {
+                Detection::NotImage => PreviewState::Hidden,
+                Detection::Error(message) => PreviewState::Error(message),
+                Detection::Ready(decoded) => {
+                    let texture_options = if decoded.width <= 64 && decoded.height <= 64 {
+                        TextureOptions::NEAREST
+                    } else {
+                        TextureOptions::LINEAR
+                    };
+                    let texture = ctx.load_texture(
+                        format!(
+                            "encoded-image-preview-{}-{}",
+                            key.node_id, key.text_revision
+                        ),
+                        decoded.image,
+                        texture_options,
+                    );
+                    PreviewState::Ready(RenderedPreview {
+                        texture,
+                        format: decoded.format,
+                        encoding: decoded.encoding,
+                        width: decoded.width,
+                        height: decoded.height,
+                        encoded_bytes: decoded.encoded_bytes,
+                        warning: decoded.warning,
+                    })
+                }
+            };
+        }
+        if self.worker.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -300,80 +321,19 @@ fn detect_encoded_image_for_texture(
         ));
     }
 
-    let image_format = match image::guess_format(&bytes) {
-        Ok(format) => format,
-        Err(_) if !candidate.explicit => return Detection::NotImage,
-        Err(_) => {
+    if image::guess_format(&bytes).is_err() {
+        if !candidate.explicit {
+            return Detection::NotImage;
+        } else {
             return Detection::Error("The decoded data is not a supported image.".to_string());
         }
-    };
-    let Some(format) = PreviewImageFormat::from_image_format(image_format) else {
-        return Detection::Error(
-            "Only PNG, JPEG, GIF, WebP, and BMP previews are supported.".to_string(),
-        );
-    };
-
-    let mut dimension_reader = ImageReader::with_format(Cursor::new(&bytes), image_format);
-    dimension_reader.limits(image_limits());
-    let (width, height) = match dimension_reader.into_dimensions() {
-        Ok(dimensions) => dimensions,
-        Err(error) => {
-            return Detection::Error(format!("The decoded image is invalid: {error}"));
-        }
-    };
-
-    if let Err(message) = validate_image_dimensions(width, height) {
-        return Detection::Error(message);
     }
-
-    let mut decode_reader = ImageReader::with_format(Cursor::new(&bytes), image_format);
-    decode_reader.limits(image_limits());
-    let mut decoder = match decode_reader.into_decoder() {
-        Ok(decoder) => decoder,
-        Err(error) => {
-            return Detection::Error(format!("The decoded image is invalid: {error}"));
-        }
+    let decoded = match decode_image_bytes(&bytes, runtime_texture_side, use_ethercat_transparency)
+    {
+        Ok(decoded) => decoded,
+        Err(message) => return Detection::Error(message),
     };
-    let orientation = match decoder.orientation() {
-        Ok(orientation) => orientation,
-        Err(error) => {
-            return Detection::Error(format!("Cannot read the image orientation: {error}"));
-        }
-    };
-    let mut image = match DynamicImage::from_decoder(decoder) {
-        Ok(image) => image,
-        Err(error) => {
-            return Detection::Error(format!("The decoded image is invalid: {error}"));
-        }
-    };
-    image.apply_orientation(orientation);
-    let (width, height) = (image.width(), image.height());
-    if let Err(message) = validate_image_dimensions(width, height) {
-        return Detection::Error(message);
-    }
-
-    if use_ethercat_transparency {
-        let mut rgba = image.into_rgba8();
-        for pixel in rgba.pixels_mut() {
-            if pixel.0[..3] == [0xff, 0x00, 0xff] {
-                pixel.0[3] = 0;
-            }
-        }
-        image = DynamicImage::ImageRgba8(rgba);
-    }
-
-    let max_texture_side = runtime_texture_side
-        .clamp(1, MAX_PREVIEW_TEXTURE_SIDE)
-        .min(MAX_IMAGE_DIMENSION);
-    if width > max_texture_side || height > max_texture_side {
-        image = image.resize(max_texture_side, max_texture_side, FilterType::Triangle);
-    }
-    let rgba = image.into_rgba8();
-    let color_image = ColorImage::from_rgba_unmultiplied(
-        [rgba.width() as usize, rgba.height() as usize],
-        rgba.as_raw(),
-    );
-
+    let format = decoded.format;
     let warning = candidate.declared_format.and_then(|declared| {
         (declared != format).then(|| {
             format!(
@@ -385,17 +345,17 @@ fn detect_encoded_image_for_texture(
     });
 
     Detection::Ready(DecodedPreview {
-        image: color_image,
+        image: decoded.image,
         format,
         encoding: candidate.encoding,
-        width,
-        height,
+        width: decoded.width,
+        height: decoded.height,
         encoded_bytes: bytes.len(),
         warning,
     })
 }
 
-fn preview_display_size(width: u32, height: u32, max_size: egui::Vec2) -> egui::Vec2 {
+pub(crate) fn preview_display_size(width: u32, height: u32, max_size: egui::Vec2) -> egui::Vec2 {
     let natural_size = egui::vec2(width as f32, height as f32);
     let fit_scale = (max_size.x / natural_size.x).min(max_size.y / natural_size.y);
     let scale = if natural_size.max_elem() < 96.0 {
@@ -572,7 +532,8 @@ fn has_hex_image_signature(value: &str) -> bool {
         return false;
     }
 
-    digits.starts_with(b"424D")
+    digits.starts_with(b"00000100")
+        || digits.starts_with(b"424D")
         || digits.starts_with(b"89504E47")
         || digits.starts_with(b"FFD8FF")
         || digits.starts_with(b"47494638")
@@ -651,34 +612,12 @@ fn decode_payload(payload: &[u8]) -> Result<Vec<u8>, ()> {
     decoded.map_err(|_| ())
 }
 
-fn image_limits() -> Limits {
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
-    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
-    limits
-}
-
-fn validate_image_dimensions(width: u32, height: u32) -> Result<(), String> {
-    if width == 0 || height == 0 {
-        return Err("The decoded image has invalid dimensions.".to_string());
-    }
-
-    let pixel_count = u64::from(width) * u64::from(height);
-    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION || pixel_count > MAX_IMAGE_PIXELS
-    {
-        return Err(format!(
-            "Image dimensions exceed the preview limit (maximum {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} and {MAX_IMAGE_PIXELS} pixels)."
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, Rgba, RgbaImage};
+    use crate::services::image_conversion::MAX_IMAGE_DIMENSION;
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
 
     fn image_bytes(format: ImageFormat, width: u32, height: u32) -> Vec<u8> {
         let image = RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255]));
@@ -857,6 +796,7 @@ mod tests {
             (ImageFormat::Gif, PreviewImageFormat::Gif),
             (ImageFormat::WebP, PreviewImageFormat::WebP),
             (ImageFormat::Bmp, PreviewImageFormat::Bmp),
+            (ImageFormat::Ico, PreviewImageFormat::Ico),
         ];
 
         for (image_format, preview_format) in formats {
@@ -981,9 +921,15 @@ mod tests {
 
         let _ = context.run(Default::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                renderer.show(ui, 7, 1, "image", &first, false);
+                renderer.show(ui, (1, 7, 1), "image", &first, false, &Localization::new());
             });
         });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while renderer.worker.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll(&context);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(
             matches!(&renderer.state, PreviewState::Ready(preview) if (preview.width, preview.height) == (2, 1))
         );
@@ -991,9 +937,15 @@ mod tests {
         let second = STANDARD.encode(image_bytes(ImageFormat::Png, 1, 2));
         let _ = context.run(Default::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                renderer.show(ui, 7, 2, "image", &second, true);
+                renderer.show(ui, (1, 7, 2), "image", &second, true, &Localization::new());
             });
         });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while renderer.worker.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll(&context);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(
             matches!(&renderer.state, PreviewState::Ready(preview) if (preview.width, preview.height) == (1, 2))
         );

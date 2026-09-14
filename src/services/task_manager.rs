@@ -11,6 +11,7 @@
 //! at safe points. Library calls that cannot be interrupted still work:
 //! their results are discarded when the flag is set.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -66,6 +67,7 @@ pub struct TaskSpec {
 /// Scheduler for background jobs. Clone-free; the UI owns one instance.
 pub struct TaskManager {
     next_job: AtomicU64,
+    ready: Mutex<VecDeque<FinishedJob>>,
     pending: Mutex<Vec<PendingJob>>,
     /// Capacity bound on concurrently running threads.
     permits: Arc<CountingSemaphore>,
@@ -141,6 +143,7 @@ impl TaskManager {
         let (tx, rx) = std::sync::mpsc::channel();
         TaskManager {
             next_job: AtomicU64::new(1),
+            ready: Mutex::new(VecDeque::new()),
             pending: Mutex::new(Vec::new()),
             permits: Arc::new(CountingSemaphore::new(max_parallel.max(1))),
             results: (tx, Mutex::new(rx)),
@@ -209,7 +212,8 @@ impl TaskManager {
     /// Non-blocking poll for the next finished job whose triple still
     /// matches `session`/`revision` and whose cancellation flag is clear.
     ///
-    /// Stale or cancelled results are dropped silently. `Ok(None)` means
+    /// Other sessions are retained for their pollers. Stale revisions of this
+    /// session and cancelled results are dropped silently. `Ok(None)` means
     /// "nothing applicable right now" (channel drained); `Err` means the
     /// channel closed.
     pub fn take_outcome(
@@ -217,22 +221,23 @@ impl TaskManager {
         session: SessionId,
         revision: Revision,
     ) -> Result<Option<JobOutcome>, std::sync::mpsc::TryRecvError> {
+        let mut ready = self.ready.lock().expect("ready jobs lock");
+        ready.extend(self.results.1.lock().expect("results lock").try_iter());
         loop {
-            let received = {
-                let receiver = self.results.1.lock().expect("results lock");
-                receiver.try_recv()?
+            // Other sessions have independent pollers (save/open/dialog/tools).
+            // Keep their results until that poller asks for them.
+            let Some(index) = ready.iter().position(|(spec, cancel, _)| {
+                spec.session == session || cancel.load(Ordering::SeqCst)
+            }) else {
+                return Err(std::sync::mpsc::TryRecvError::Empty);
             };
-            let (spec, cancel, payload) = received;
-            // Delivered (or discarded): the job is no longer pending.
+            let (spec, cancel, payload) = ready.remove(index).expect("known index");
             self.pending
                 .lock()
                 .expect("pending jobs lock")
-                .retain(|pending| pending.spec.job != spec.job);
-            if cancel.load(Ordering::SeqCst) {
-                continue; // cancelled job: drop
-            }
-            if spec.session != session || spec.revision != revision {
-                continue; // stale: drop
+                .retain(|p| p.spec.job != spec.job);
+            if cancel.load(Ordering::SeqCst) || spec.revision != revision {
+                continue;
             }
             return Ok(Some(JobOutcome {
                 job: spec.job,
@@ -249,6 +254,15 @@ impl TaskManager {
             match self.take_outcome(session, revision) {
                 Ok(outcome) => return outcome,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if !self
+                        .pending
+                        .lock()
+                        .expect("pending jobs lock")
+                        .iter()
+                        .any(|p| p.spec.session == session && !p.cancel.load(Ordering::SeqCst))
+                    {
+                        return None;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
